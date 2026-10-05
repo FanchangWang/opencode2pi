@@ -188,9 +188,9 @@ T5 的进阶版本（模型状态追踪）可以延后到 T6 之后。
 
 ## 5. 每一步都必须重跑的验证
 
-```sh
-cd C:/Users/guyue/code/opencode2pi
+以下命令都在**仓库根目录**执行（路径均相对仓库根）：
 
+```sh
 # 冒烟：基础对话           期望：输出恰好 OK
 omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
 

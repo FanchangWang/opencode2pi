@@ -84,7 +84,7 @@ doctor 会报「闸门正常」而真实路径已失效 —— 那正是这段�
 
 ## 验证
 
-改完代码，**这三条全绿才算完成**：
+改完代码，**这三条全绿才算完成**。以下命令都在**仓库根目录**执行：
 
 ```sh
 omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"

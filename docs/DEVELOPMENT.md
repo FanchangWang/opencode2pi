@@ -132,7 +132,7 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 
 ## 5. 验证
 
-改完代码跑这三条，全绿才算完成：
+改完代码跑这三条，全绿才算完成。以下命令都在**仓库根目录**执行：
 
 ```sh
 # 冒烟
