@@ -1,0 +1,41 @@
+{
+  "name": "opencode2pi",
+  "version": "0.1.0",
+  "description": "OpenCode Zen's anonymous free models (no API key) as a native omp/pi provider extension.",
+  "license": "MIT",
+  "author": "FanchangWang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FanchangWang/opencode2pi.git"
+  },
+  "keywords": [
+    "omp",
+    "pi",
+    "pi-extension",
+    "opencode",
+    "opencode-zen",
+    "free-models"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "smoke": "omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle \"Reply with exactly OK\""
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
