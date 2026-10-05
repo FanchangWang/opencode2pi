@@ -122,7 +122,24 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 - 一次 `MODEL_GONE` 只标 ⚠️，**连续两次**才升级 ❌
 - 任何一次成功清零计数
 - `REGION_BLOCKED` 对同一出口是确定性的，命中即 ❌
-- 通道级失败（`SHAPE_REJECTED` / `AUTH`）**不记到模型头上** —— 那是全roster 的问题，不是某个模型的
+- 通道级失败（`SHAPE_REJECTED` / `AUTH`）**不记到模型头上** —— 那是全 roster 的问题，不是某个模型的
+- `RATE_LIMIT` 和 transport 超时同样**不是模型判定**，标 🚧「配额受限」
+
+### 4.4.1 429 是按模型计费，不是按 IP
+
+实测 2026-10-06：串行探测（并发 1、间隔 1.5s）时 `big-pickle` 返回 200，
+同一次运行里 `ling-3.1-flash-free` / `longcat-2.5-preview-free` 返回 429。
+所以 429 说的不是「这个出口被打爆了」，而是「这个 id 的匿名额度用完了」——
+把它算成模型不稳定是**归错因**。
+
+同一个模型连续失败 10 次且每次响应完全一致（实测 `jev-1.13-free` 恒 500、
+`ling-3.0-flash-fin-free` 恒 400、`muse-spark-1.3-contributor-free` 恒 403），
+那是稳定的坏，不是抖动。真正会翻转的只有 429 额度和 `nemotron-3.ultra-free`
+那种 401→200。展示层把前者和后者画成同一个 ⚠️，才让通道显得不稳定。
+
+探测本身也会烧配额：一次全扫是 13 个请求，打成突发会把下一轮自己的额度吃掉。
+所以 `PROBE_CONCURRENCY` 是 2，每发一个请求后停 500ms。这**缓解**自伤，
+治不了 429 —— 429 本来就是按模型计的。
 
 ### 4.5 健康状态只标注，不隐藏
 

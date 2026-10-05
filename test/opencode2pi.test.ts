@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { mergeHealth, pruneHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
+import { healthFor, mergeHealth, pruneHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
@@ -319,5 +319,20 @@ describe('health verdicts (T5)', () => {
 		const twice = pruneHealth(mergeHealth(once, [probe('m', 'MODEL_GONE', 'flaky')]), new Set(['m']))
 		expect(twice['m']?.health).toBe('dead')
 		expect(twice['m']?.terminalFailures).toBe(2)
+	})
+
+	test('a rate limit is not a verdict on the model', () => {
+		// Measured 2026-10-06: 429 is metered per model, not per IP, so it must
+		// not read as an unstable model. A transport timeout says the same thing:
+		// the request may never have reached the model.
+		expect(healthFor('RATE_LIMIT')).toBe('limited')
+		expect(healthFor('UPSTREAM')).toBe('flaky')
+		expect(summarizeHealth([{ id: 'm' }], mergeHealth({}, [probe('m', 'RATE_LIMIT', 'limited')]))).toBe('🚧 1')
+	})
+
+	test('a quota pause neither revives nor condemns a dead model', () => {
+		const dead = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky'), probe('m', 'MODEL_GONE', 'flaky')])
+		const paused = mergeHealth(dead, [probe('m', 'RATE_LIMIT', 'limited')])
+		expect(paused['m']?.health).toBe('dead')
 	})
 })

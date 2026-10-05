@@ -27,18 +27,38 @@ import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
 import { sendGateProbe } from './gate.ts'
 
-/** Probes hit the same anonymous IP quota as real traffic, so stay polite. */
-const PROBE_CONCURRENCY = 4
+/**
+ * Probe pacing.
+ *
+ * The anonymous lane meters per egress IP, so a sweep of 13 requests fired at
+ * once spends quota the next sweep needs. Concurrency 2 with a short pause keeps
+ * a sweep from starving its own follow-up.
+ *
+ * Measured 2026-10-06: 429 turned out to be metered *per model*, not per IP —
+ * `big-pickle` answered 200 in the same minute that two other ids answered 429,
+ * serially and 1.5 s apart. So pacing reduces self-inflicted pressure but does
+ * not cure it, which is why a rate-limited verdict gets its own mark instead of
+ * being reported as an unstable model.
+ */
+const PROBE_CONCURRENCY = 2
+const PROBE_GAP_MS = 500
+
+function delay(ms: number): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>()
+	setTimeout(resolve, ms)
+	return promise
+}
 /** How long a stored verdict is shown before it is refreshed. */
 export const HEALTH_TTL_MS = 6 * 60 * 60 * 1000
 
-export type ModelHealth = 'ok' | 'flaky' | 'dead' | 'unknown'
+export type ModelHealth = 'ok' | 'flaky' | 'dead' | 'unknown' | 'limited'
 
 export const HEALTH_MARK: Readonly<Record<ModelHealth, string>> = {
 	ok: '✅',
 	flaky: '⚠️',
 	dead: '❌',
 	unknown: '❓',
+	limited: '🚧',
 }
 
 export interface HealthRecord {
@@ -71,8 +91,15 @@ export const TERMINAL_FAILURES_TO_CONDEMN = 2
  *
  * `REGION_BLOCKED` is the exception: a geo block is deterministic for a given
  * egress, so one hit is conclusive.
+ *
+ * `RATE_LIMIT` is not a verdict on the model at all. The anonymous lane meters
+ * quota separately per model — measured 2026-10-06, `big-pickle` answered 200
+ * while two other ids answered 429 in the same minute, probed serially — so a
+ * 429 says "this id is out of quota right now", which is a fact about the lane
+ * and not about whether the model works. It gets its own mark so that a quota
+ * pause never masquerades as an unstable model.
  */
-function healthFor(kind: UpstreamFailure | 'OK'): ModelHealth {
+export function healthFor(kind: UpstreamFailure | 'OK'): ModelHealth {
 	switch (kind) {
 		case 'OK':
 			return 'ok'
@@ -81,6 +108,7 @@ function healthFor(kind: UpstreamFailure | 'OK'): ModelHealth {
 		case 'REGION_BLOCKED':
 			return 'dead'
 		case 'RATE_LIMIT':
+			return 'limited'
 		case 'UPSTREAM':
 			return 'flaky'
 		default:
@@ -101,9 +129,10 @@ async function probeModel(modelId: string): Promise<ProbeResult> {
 		return { ...base, health: 'ok', kind: 'OK', detail: `HTTP ${probe.status}` }
 	}
 	if (probe.transportError !== undefined) {
-		// A timeout or transport failure says nothing about the model itself.
-		return { ...base, health: 'flaky', kind: 'UPSTREAM', detail: `transport: ${probe.transportError}` }
-	}
+		// A timeout or transport failure says nothing about the model itself:
+		// the 30 s budget can expire on a slow lane, or the request never left.
+		return { ...base, health: 'limited', kind: 'UPSTREAM', detail: `transport: ${probe.transportError}` }
+}
 
 	const kind = classifyUpstreamFailure(probe.status, probe.body).kind
 	return {
@@ -114,7 +143,7 @@ async function probeModel(modelId: string): Promise<ProbeResult> {
 	}
 }
 
-/** Probe every model with a bounded worker pool, reporting progress as it goes. */
+/** Probe every model with a bounded, paced worker pool, reporting progress as it goes. */
 export async function probeAll(
 	models: readonly ProviderModelConfig[],
 	onProgress?: (done: number, total: number, result: ProbeResult) => void,
@@ -129,6 +158,7 @@ export async function probeAll(
 			const result = await probeModel(model.id)
 			results.push(result)
 			onProgress?.(results.length, models.length, result)
+			await delay(PROBE_GAP_MS)
 		}
 	}
 
@@ -153,7 +183,14 @@ export async function loadHealth(): Promise<HealthStore> {
 			if (!('health' in value) || !('checkedAt' in value)) continue
 			const record = value as Partial<HealthRecord>
 			if (typeof record.checkedAt !== 'number') continue
-			if (record.health !== 'ok' && record.health !== 'flaky' && record.health !== 'dead' && record.health !== 'unknown') continue
+			if (
+				record.health !== 'ok' &&
+				record.health !== 'flaky' &&
+				record.health !== 'dead' &&
+				record.health !== 'unknown' &&
+				record.health !== 'limited'
+			)
+				continue
 			out[id] = {
 				health: record.health,
 				kind: record.kind ?? 'UNKNOWN',
@@ -242,7 +279,7 @@ export function isStale(record: HealthRecord | undefined): boolean {
 }
 
 /** Canonical order, so the summary reads the same way on every run. */
-const VERDICT_ORDER: readonly ModelHealth[] = ['ok', 'flaky', 'unknown', 'dead']
+const VERDICT_ORDER: readonly ModelHealth[] = ['ok', 'flaky', 'limited', 'unknown', 'dead']
 
 /**
  * Summarize the roster's verdicts as they are *displayed*.
@@ -252,7 +289,7 @@ const VERDICT_ORDER: readonly ModelHealth[] = ['ok', 'flaky', 'unknown', 'dead']
  * so counting raw results makes the summary contradict the lines right below it.
  */
 export function summarizeHealth(roster: readonly { readonly id: string }[], store: HealthStore): string {
-	const counts: Record<ModelHealth, number> = { ok: 0, flaky: 0, dead: 0, unknown: 0 }
+	const counts: Record<ModelHealth, number> = { ok: 0, flaky: 0, dead: 0, unknown: 0, limited: 0 }
 	for (const model of roster) counts[store[model.id]?.health ?? 'unknown']++
 	return VERDICT_ORDER.filter((health) => counts[health] > 0)
 		.map((health) => `${HEALTH_MARK[health]} ${counts[health]}`)
