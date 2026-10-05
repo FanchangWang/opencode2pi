@@ -1,6 +1,6 @@
 {
   "name": "opencode2pi",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "OpenCode Zen's anonymous free models (no API key) as a native omp/pi provider extension.",
   "license": "MIT",
   "author": "FanchangWang",
