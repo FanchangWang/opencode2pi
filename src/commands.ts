@@ -17,7 +17,16 @@ import type { ExtensionCommandContext, ProviderModelConfig } from '@oh-my-pi/pi-
 
 import { discoverFreeModels } from './discovery.ts'
 import { runDoctor } from './doctor.ts'
-import { HEALTH_MARK, isStale, loadHealth, probeAll, saveHealth, type HealthRecord, type ModelHealth } from './health.ts'
+import {
+	HEALTH_MARK,
+	isStale,
+	loadHealth,
+	probeAll,
+	saveHealth,
+	summarizeHealth,
+	type HealthRecord,
+	type ModelHealth,
+} from './health.ts'
 import { SEED_MODELS } from './seed.ts'
 
 /** Model used for the gate check: a verified id, not whatever is selected. */
@@ -66,13 +75,7 @@ async function showStatus(ctx: ExtensionCommandContext, runProbe: boolean): Prom
 	const merged = await saveHealth(results)
 
 	const lines = roster.map((model) => rosterLine(model, merged[model.id]))
-	const counts = results.reduce<Record<string, number>>((acc, result) => {
-		acc[result.health] = (acc[result.health] ?? 0) + 1
-		return acc
-	}, {})
-	const summary = Object.entries(counts)
-		.map(([health, count]) => `${HEALTH_MARK[health as ModelHealth]} ${count}`)
-		.join('  ')
+	const summary = summarizeHealth(roster, merged)
 	ctx.ui.notify(`探测完成：${summary}\n${lines.join('\n')}`)
 }
 

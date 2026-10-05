@@ -222,3 +222,21 @@ export async function saveHealth(results: readonly ProbeResult[]): Promise<Healt
 export function isStale(record: HealthRecord | undefined): boolean {
 	return record === undefined || Date.now() - record.checkedAt > HEALTH_TTL_MS
 }
+
+/** Canonical order, so the summary reads the same way on every run. */
+const VERDICT_ORDER: readonly ModelHealth[] = ['ok', 'flaky', 'unknown', 'dead']
+
+/**
+ * Summarize the roster's verdicts as they are *displayed*.
+ *
+ * The store, never the raw probe results, is the source of truth here: a
+ * second consecutive `ModelError` promotes ⚠️ to ❌ in {@link mergeHealth} only,
+ * so counting raw results makes the summary contradict the lines right below it.
+ */
+export function summarizeHealth(roster: readonly { readonly id: string }[], store: HealthStore): string {
+	const counts: Record<ModelHealth, number> = { ok: 0, flaky: 0, dead: 0, unknown: 0 }
+	for (const model of roster) counts[store[model.id]?.health ?? 'unknown']++
+	return VERDICT_ORDER.filter((health) => counts[health] > 0)
+		.map((health) => `${HEALTH_MARK[health]} ${counts[health]}`)
+		.join('  ')
+}

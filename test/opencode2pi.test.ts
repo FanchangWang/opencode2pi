@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { mergeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
+import { mergeHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
@@ -281,5 +281,20 @@ describe('health verdicts (T5)', () => {
 	test('intermittent models keep a non-fatal mark', () => {
 		// ling-3.0-flash-fin-free answers 400 on this lane; it must never be ❌.
 		expect(mergeHealth({}, [probe('ling-3.0-flash-fin-free', 'REQUEST_REJECTED', 'unknown')])['ling-3.0-flash-fin-free']?.health).toBe('unknown')
+	})
+
+	test('the summary counts the displayed verdict, not the raw probe result', () => {
+		// `m` is promoted to ❌ by its second consecutive ModelError. The raw
+		// result is still flaky, so counting results renders ⚠️ above a ❌ line.
+		const store = mergeHealth(
+			mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky')]),
+			[probe('m', 'MODEL_GONE', 'flaky'), probe('fine', 'OK', 'ok')],
+		)
+		expect(summarizeHealth([{ id: 'm' }, { id: 'fine' }], store)).toBe('✅ 1  ❌ 1')
+	})
+
+	test('every roster model is counted exactly once', () => {
+		const store = mergeHealth({}, [probe('a', 'OK', 'ok')])
+		expect(summarizeHealth([{ id: 'a' }, { id: 'unprobed' }], store)).toBe('✅ 1  ❓ 1')
 	})
 })
