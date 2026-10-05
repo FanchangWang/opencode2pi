@@ -169,10 +169,11 @@ jobs:
             || gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"
 
       # `stable` is the ref README installs from, so the install command in
-      # README.md never has to be hand-edited when a version ships. It is moved
-      # last and gates nothing: a release that failed a check earlier produced
-      # nothing worth pointing anybody at.
+      # README.md never has to be hand-edited when a version ships. It is a
+      # lightweight tag rather than a branch because this remote rejects
+      # creating branches. It moves last and gates nothing: a release that
+      # failed an earlier check produced nothing worth pointing anybody at.
       - name: Move the stable ref to this release
         if: always()
         run: |
-          git push origin "$GITHUB_SHA:refs/heads/stable"
+          git push --force origin "$GITHUB_SHA:refs/tags/stable"

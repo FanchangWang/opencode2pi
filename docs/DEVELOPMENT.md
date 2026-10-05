@@ -165,8 +165,10 @@ bun test
 
 README 的 git 安装命令写 `@stable`，不发版就不需要改它 —— 手改版本号这件事
 只会在某一次发版被漏掉，而漏掉时没有任何报错：文档安静地指向上一版。
-workflow 在 tag 推送后执行 `git push origin "$GITHUB_SHA:refs/heads/stable"`，
-把 `stable` 前移到本次发版的 commit。
+workflow 在 tag 推送后执行 `git push --force origin "$GITHUB_SHA:refs/tags/stable"`，
+把 `stable` 前移到本次发版的 commit。它是**轻量 tag 而不是分支**：这个远端拒绝创建
+分支（实测推 `refs/heads/stable` 被 remote rejected），而 tag 可以强制前移。
+`@stable` 对分支和 tag 一样解析，用户侧的安装命令不受影响。
 
 这一步**不校验任何东西，也不失败**：它排在所有检查之后，不能成为发版的卡点
 （发版失败只在 GitHub 上可见，没人盯着就会白白卡住）。
