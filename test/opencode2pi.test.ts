@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { mergeHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
+import { mergeHealth, pruneHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
@@ -296,5 +296,28 @@ describe('health verdicts (T5)', () => {
 	test('every roster model is counted exactly once', () => {
 		const store = mergeHealth({}, [probe('a', 'OK', 'ok')])
 		expect(summarizeHealth([{ id: 'a' }, { id: 'unprobed' }], store)).toBe('✅ 1  ❓ 1')
+	})
+
+	test('the store keeps only the models the current roster contains', () => {
+		// Upstream adds and withdraws models, so a merge-only store would keep
+		// every id the lane ever served, real or not.
+		const store = mergeHealth({}, [
+			probe('kept', 'OK', 'ok'),
+			probe('retired-upstream-model', 'MODEL_GONE', 'flaky'),
+			probe('never-existed', 'MODEL_GONE', 'flaky'),
+		])
+
+		const pruned = pruneHealth(store, new Set(['kept']))
+		expect(Object.keys(pruned)).toEqual(['kept'])
+		expect(pruned['kept']?.health).toBe('ok')
+	})
+
+	test('pruning keeps the surviving counters intact', () => {
+		// `m` must reach ❌ across two runs; pruning must not reset the history
+	// it is judged by.
+		const once = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky'), probe('gone', 'OK', 'ok')])
+		const twice = pruneHealth(mergeHealth(once, [probe('m', 'MODEL_GONE', 'flaky')]), new Set(['m']))
+		expect(twice['m']?.health).toBe('dead')
+		expect(twice['m']?.terminalFailures).toBe(2)
 	})
 })

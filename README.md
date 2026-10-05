@@ -17,18 +17,20 @@
 omp install npm:opencode2pi
 pi  install npm:opencode2pi
 
-# 不走 npm：钉到 release tag，可复现。注意：omp/pi 不支持 .tgz，只能用 git
-omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.1
-pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.1
+# 不走 npm：从 git 装。注意：omp/pi 不支持 .tgz，只能用 git URL
+omp install git:https://github.com/FanchangWang/opencode2pi@stable
+pi  install git:https://github.com/FanchangWang/opencode2pi@stable
 
-# 追踪最新代码：装的是"此刻 main 指向的 commit"，之后不会自动更新，要更新就重跑这一行
-# 建议优先用 tag —— 上游随时可能改闸门，钉 tag 才能复现"当时能用"的状态
+# 追踪最新代码：装的是"此刻 main 指向的 commit"，含未发布的改动，之后不会自动更新
 omp install git:https://github.com/FanchangWang/opencode2pi@main
 pi  install git:https://github.com/FanchangWang/opencode2pi@main
 ```
 
-没有 `latest` 这种写法：那是 npm 的概念，git 里没有对应 ref（实测报 `#latest failed to resolve`）。
-想要"自动拿最新"，只有 npm 那条路才有。
+`@stable` 是最近一次发版的版本，随发版前移；要固定到某一版，去
+[releases](https://github.com/FanchangWang/opencode2pi/releases) 挑一个 tag，
+把 `@stable` 换成那个 tag 名或 commit SHA。上游随时可能改闸门，只有钉死才能复现"当时能用"的状态。
+
+`@latest` 用不了：git 没有这个 ref，omp 解析会报错。
 
 ### 从源码运行（开发用）
 

@@ -159,7 +159,19 @@ bun test
 打 `vX.Y.Z` tag 触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：
 
 校验 tag 与 `package.json` 版本一致 → `npm ci` → typecheck → test →
-校验 tarball 产物完整 → 发布 npm → 建 GitHub Release。
+校验 tarball 产物完整 → 发布 npm → 建 GitHub Release → 前移 `stable` ref。
+
+### `stable` ref：README 里不该出现版本号
+
+README 的 git 安装命令写 `@stable`，不发版就不需要改它 —— 手改版本号这件事
+只会在某一次发版被漏掉，而漏掉时没有任何报错：文档安静地指向上一版。
+workflow 在 tag 推送后执行 `git push origin "$GITHUB_SHA:refs/heads/stable"`，
+把 `stable` 前移到本次发版的 commit。
+
+这一步**不校验任何东西，也不失败**：它排在所有检查之后，不能成为发版的卡点
+（发版失败只在 GitHub 上可见，没人盯着就会白白卡住）。
+
+代价是 `@stable` 不固定版本。要复现某一版，用户自己去 releases 挑 tag 钉死。
 
 ### 两种认证方式，workflow 自动二选一
 

@@ -207,8 +207,26 @@ export function mergeHealth(previous: HealthStore, results: readonly ProbeResult
 	return merged
 }
 
+/**
+ * Drop every model the current roster no longer contains.
+ *
+ * The free lane follows upstream: models get added and withdrawn, so a
+ * merge-only store accumulates the whole history of ids — `no-such-model-xyz`
+ * and other ids that were never real — and grows without bound. A probe covers
+ * exactly the current roster (`probeAll` walks it end to end), so the ids in
+ * `results` *are* the roster, and anything else is a model upstream retired.
+ * Keeping those records would answer no question anyone can still ask.
+ */
+export function pruneHealth(store: HealthStore, keep: ReadonlySet<string>): HealthStore {
+	const pruned: Record<string, HealthRecord> = {}
+	for (const [id, record] of Object.entries(store)) {
+		if (keep.has(id)) pruned[id] = record
+	}
+	return pruned
+}
+
 export async function saveHealth(results: readonly ProbeResult[]): Promise<HealthStore> {
-	const merged = mergeHealth(await loadHealth(), results)
+	const merged = pruneHealth(mergeHealth(await loadHealth(), results), new Set(results.map((result) => result.modelId)))
 
 	try {
 		await mkdir(join(tmpdir(), 'opencode2pi'), { recursive: true })
