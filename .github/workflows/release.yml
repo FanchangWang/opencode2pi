@@ -51,7 +51,7 @@ jobs:
 
       # The extension is multi-module, so a tarball missing any of src/ fails
       # only at the user's first command. Assert the payload here instead.
-      - name: Verify the published tarball
+      - name: Verify the packed tarball
         run: |
           set -euo pipefail
           tarball="$(npm pack --silent)"
@@ -73,17 +73,66 @@ jobs:
             package/src/session.ts; do
             echo "$contents" | grep -qx "$required" || { echo "::error::$required missing from tarball"; exit 1; }
           done
-          rm -f "$tarball"
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
-      - run: npm publish --provenance --access public
+      # Secrets are not directly readable in an `if:` expression, so the
+      # presence check is done as a step and surfaced as an output.
+      - name: Detect the npm token
+        id: npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::NPM_TOKEN is not configured; skipping npm publish. The GitHub release and git install still work."
+          fi
+
+      # Only the npm step is conditional. If it is skipped or fails, the tag and
+      # the release must still be produced: pi and omp both install from a git
+      # ref, so a release without npm is a complete, usable distribution.
+      - name: Publish to npm
+        id: publish
+        if: steps.npm.outputs.available == 'true'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create the GitHub release
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARBALL: ${{ env.TARBALL }}
+          NPM_PUBLISHED: ${{ steps.publish.outcome == 'success' }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            || gh release edit "$GITHUB_REF_NAME" --generate-notes
+          notes="$(mktemp)"
+          if [ "${NPM_PUBLISHED:-}" = "true" ]; then
+            printf 'Published to npm as `opencode2pi@%s`.\n\n' "${GITHUB_REF_NAME#v}" > "$notes"
+          else
+            printf '**npm was not published for this tag** (no `NPM_TOKEN` secret).\n\n' > "$notes"
+          fi
+          cat >> "$notes" <<'EOF'
+          Install:
+
+          ```sh
+          omp install npm:opencode2pi
+          pi install npm:opencode2pi
+          ```
+
+          Without npm, install straight from the tag:
+
+          ```sh
+          omp install git:https://github.com/FanchangWang/opencode2pi@<tag>
+          pi  install git:https://github.com/FanchangWang/opencode2pi@<tag>
+          ```
+          EOF
+          sed -i "s|<tag>|$GITHUB_REF_NAME|g" "$notes"
+          # An empty asset argument would be passed through to `gh` verbatim,
+          # so the tarball is only added when it actually exists.
+          args=(--title "$GITHUB_REF_NAME" --notes-file "$notes")
+          if [ -n "${TARBALL:-}" ] && [ -f "${TARBALL:-}" ]; then
+            args+=("$TARBALL")
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
+            || gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"

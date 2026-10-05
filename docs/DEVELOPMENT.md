@@ -158,8 +158,16 @@ bun test
 
 打 `vX.Y.Z` tag 触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：
 
-校验 tag 与 `package.json` 版本一致 → `npm ci` → typecheck → test → 校验 tarball
-产物完整 → `npm publish --provenance` → 建 GitHub Release。
+校验 tag 与 `package.json` 版本一致 → `npm ci` → typecheck → test →
+校验 tarball 产物完整 → `npm publish --provenance` → 建 GitHub Release。
+
+若仓库没有配 `NPM_TOKEN`，workflow 会**跳过 npm 发布但照常产出 tag 和 Release**，
+release notes 会明确写明 npm 未发布。因为 pi/omp 都能从 git ref 安装，
+此时 `omp install git:https://github.com/FanchangWang/opencode2pi@vX.Y.Z` 仍然可用。
+
+宿主**不支持**直接安装 `.tgz` 文件（实测报 `package.json not found`），
+支持的源是：npm spec、git ref、`https://` 仓库地址、本地目录。
+所以 release 里的 tarball 附件只作存档，不是安装路径。
 
 一次 `npm publish` 同时服务两个宿主：`pi install npm:opencode2pi` 和
 `omp install npm:opencode2pi` 都从 npm 解析，pi.dev 的包目录也是索引 npm，

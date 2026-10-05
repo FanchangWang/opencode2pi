@@ -33,6 +33,13 @@ omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle "你好"
 > **不要只复制 `src/index.ts`**。扩展是多文件模块，`index.ts` 依赖同目录的其它模块。
 > 要手动常驻就整目录复制：`cp -r src ~/.omp/agent/extensions/opencode2pi`。
 
+不想用 npm 也可以直接从 Git 仓库装（锁定到具体版本）：
+
+```sh
+omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
+pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
+```
+
 ---
 
 ## 使用
