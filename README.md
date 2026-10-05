@@ -13,32 +13,41 @@
 ## 安装
 
 ```sh
+# 推荐：npm（pi 与 omp 都从这个源装；npm 还没上线时用下面的 git）
 omp install npm:opencode2pi
+pi  install npm:opencode2pi
+
+# 不走 npm：钉到 release tag，可复现。注意：omp/pi 不支持 .tgz，只能用 git
+omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
+pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
+
+# 追踪最新代码：装的是"此刻 main 指向的 commit"，之后不会自动更新，要更新就重跑这一行
+# 建议优先用 tag —— 上游随时可能改闸门，钉 tag 才能复现"当时能用"的状态
+omp install git:https://github.com/FanchangWang/opencode2pi@main
+pi  install git:https://github.com/FanchangWang/opencode2pi@main
 ```
 
-pi 用户：
+没有 `latest` 这种写法：那是 npm 的概念，git 里没有对应 ref（实测报 `#latest failed to resolve`）。
+想要"自动拿最新"，只有 npm 那条路才有。
 
-```sh
-pi install npm:opencode2pi
-```
-
-从源码运行（开发用）：
+### 从源码运行（开发用）
 
 ```sh
 git clone https://github.com/FanchangWang/opencode2pi.git
 cd opencode2pi
+
+# 链接当前目录：改代码立即生效，不用重装
+omp install .
+
+# 单次试用，不落盘
 omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle "你好"
 ```
 
+`omp install .` 是**链接而非拷贝**：装的是路径，所以改 `src/` 下的代码下次启动就生效。
+代价是删掉或移动这个目录，扩展就失效了 —— 所以本地开发用它，给别人用请走上面的 npm 或 git。
+
 > **不要只复制 `src/index.ts`**。扩展是多文件模块，`index.ts` 依赖同目录的其它模块。
 > 要手动常驻就整目录复制：`cp -r src ~/.omp/agent/extensions/opencode2pi`。
-
-不想用 npm 也可以直接从 Git 仓库装（锁定到具体版本）：
-
-```sh
-omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
-pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
-```
 
 ---
 
