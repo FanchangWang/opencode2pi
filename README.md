@@ -6,6 +6,10 @@
 
 宿主内建的 `opencode-zen` provider 需要付费 `OPENCODE_API_KEY`；本扩展走的是Zen 的匿名通道（`Authorization: Bearer public`），拿到的是那一批免费模型。
 
+> ⚠️ **这是匿名免费通道，上游随时可能改闸门或直接关停。** 它不依赖任何凭据，
+> 所以上游一旦调整请求形状校验，本扩展会**全线 403 且不会自己报警**。
+> 三周内上游已改过三次策略。发现问题先跑 `/opencode2pi doctor`。
+
 ---
 
 ## 现状
@@ -43,25 +47,52 @@ OK
 | session 亲和 | session id 按**会话**派生（取自宿主的 `options.sessionId`，已实测存在），同会话多轮稳定，不同会话互不污染 |
 | 错误分类 | 上游报错会被归类成人能看懂的原因，见下方排障表 |
 
+### `/opencode2pi`
+
+omp 没有扩展设置页，斜杠命令是本扩展唯一的界面：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/opencode2pi doctor` | 发一个最小闸门形状请求，判断**形状闸门是否仍然成立**。上游一改闸门，这里会明确告警，而不是让所有模型静默 403 |
+| `/opencode2pi status` | 显示当前 roster 每个模型的健康标记（必要时自动重新探测） |
+| `/opencode2pi probe` | 强制重新探测全部模型（4 并发） |
+
+标记含义：
+
+| 标记 | 含义 |
+| --- | --- |
+| ✅ | 可用 |
+| ⚠️ | **现在不行**（429 / 5xx / 超时），不代表模型没了 |
+| ❌ | 确定死了（geo 封锁，或连续两次 `ModelError`） |
+| ❓ | 未测试，或返回了无法归类的错误 |
+
+**模型永远只标注、不隐藏。** 匿名通道波动很大，单次失败不足以判死刑：
+实测 `nemotron-3.ultra-free` 一分钟内先 `401 ModelError` 再 `200`，
+所以一次 `ModelError` 只标 ⚠️，连续两次才升级为 ❌；任何一次成功都会清零。
+探测结果落盘缓存（默认 6 小时），不会每次启动都全探一遍。
+
 宿主模型元数据契约已实测确认（含一个会静默失效的坑），见 [`docs/FINDINGS.md` §7](docs/FINDINGS.md)。
 
 ---
 
-## 安装（开发态）
+## 安装
 
 ```sh
+# 方式一：omp 直接安装（推荐，会自动链接并常驻）
+omp install npm:opencode2pi
+
+# 方式二：从源码
 git clone https://github.com/FanchangWang/opencode2pi.git
 cd opencode2pi
-
-# 单次会话
 omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle "你好"
-
-# 常驻（写入 agent 目录）
-cp src/index.ts ~/.omp/agent/extensions/opencode2pi.ts
 ```
 
+> **不要只复制 `src/index.ts`**：扩展现在是多文件模块，`index.ts` 依赖同目录的
+> `discovery / metadata / seed / session / errors / health / gate / commands`。
+> 要手动常驻就整目录复制：`cp -r src ~/.omp/agent/extensions/opencode2pi`。
+
 > 用 `--model <provider>/<model>`，**不要**用 `--provider` —— 扩展注册的 provider 在参数校验阶段还不可见，会报 `Unknown provider`。
-> 同理，`omp models` **不列出**扩展注册的 provider（实测），查清单请用会话内的 `/model`。
+> 同理，`omp models` **不列出**扩展注册的 provider（实测），查清单请用会话内的 `/model` 或 `/opencode2pi status`。
 
 ---
 

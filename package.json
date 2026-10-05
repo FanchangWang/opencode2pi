@@ -30,6 +30,9 @@
       "./src/index.ts"
     ]
   },
+  "files": [
+    "src/"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",

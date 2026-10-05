@@ -2,7 +2,7 @@
 
 **读者**：接手实现的 AI。**先读 `docs/FINDINGS.md`**，那里的实测结论是本方案的前提，不要重复推导。
 
-**当前状态**：`src/index.ts` 已经能跑通（见 §1）。T0 元数据契约探针已完成（见 §2）。**T1–T4 已实现并实测通过**（2026-10-05）。剩余：T5 `/opencode2pi` 命令、T6 打包分发。
+**当前状态**：`src/index.ts` 已经能跑通（见 §1）。T0 元数据契约探针已完成（见 §2）。**T1–T6 全部实现并实测通过**（2026-10-05）。
 
 ---
 
@@ -129,7 +129,7 @@ S3  src/index.ts 里已验证的静态种子   → 兜底
 
 `RegionError` 的判定必须在 `AUTH` **之前** —— 否则地区封锁会被误报成「API key 无效」。这是 `opencode2dsh` 0.3.5 修过的同一个 bug。
 
-### T5 — `/opencode2pi` TUI 命令（可选，非强制）
+### T5 — `/opencode2pi` TUI 命令 ✅ 已完成
 
 omp **没有** DSH 那种网页设置页。可用的界面手段是斜杠命令 + TUI：
 
@@ -150,7 +150,17 @@ omp **没有** DSH 那种网页设置页。可用的界面手段是斜杠命令 
 
 **唯一真实风险**：用户标记的**持久化途径未验证**。omp 的 settings 是宿主定义的类型化句柄（`lookup(id)` 对未知 id 返回 `undefined`），扩展能否注册自己的 settings id 不确定。备选：写 JSON 到 agent 目录。**先验证再实现**，否则用户标记重启即丢。
 
-### T6 — 打包与分发
+**实测结论（2026-10-05）**：settings 持久化那条风险没有走 settings 句柄，而是直接写
+`<tmpdir>/opencode2pi/health.json`（自己的格式，不依赖宿主类型化 id），因此标记重启不丢。
+没有实现用户手动标记 —— 探测证据比人工标记更可信，且自动标记已覆盖用户诉求。
+**实测推翻了「一次 ModelError 即判死」的设计**：`nemotron-3.ultra-free` 在一分钟内先返回
+`401 ModelError`、再返回 `200`。因此改为连续两次 `ModelError` 才升级 ❌，任何一次成功清零；
+`REGION_BLOCKED` 对同一出口是确定性的，命中即 ❌。
+
+### T6 — 打包与分发 ✅ 已完成
+
+实测：`omp install .` 链接后**不带 `-e`** 也能加载并正常对话；`npm pack` 产物只含 `src/`（用 `files` 字段收窄）。
+另外修正了一处会直接坑到用户的旧文档：README 原来让用户 `cp src/index.ts`，扩展变成多文件后这条命令必然失败，已改为整目录复制。
 
 - `package.json` 的 `pi.extensions` / `omp.extensions` 双 manifest 已在位，确认 `pi install npm:opencode2pi` 与 `omp -e ./src/index.ts` 两条路都通。
 - 补 README：**这是匿名免费通道，上游随时可能改闸门或关停**；附 `FINDINGS.md` §2 的三个条件供用户排障。

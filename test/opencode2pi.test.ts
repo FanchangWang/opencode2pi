@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
+import { mergeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
@@ -214,5 +215,71 @@ describe('error classification precedence (T4)', () => {
 			expect(verdict.summary.length).toBeGreaterThan(10)
 			expect(verdict.summary).not.toContain('undefined')
 		}
+	})
+})
+
+describe('health verdicts (T5)', () => {
+	const probe = (modelId: string, kind: ProbeResult['kind'], health: ProbeResult['health']): ProbeResult => ({
+		modelId,
+		kind,
+		health,
+		detail: '',
+		checkedAt: 1_000,
+		terminalFailures: 0,
+		transientFailures: 0,
+		latencyMs: 1,
+	})
+
+	test('one ModelError is not enough to condemn a model', () => {
+		// Measured: nemotron-3.ultra-free answered 401 ModelError and then 200
+		// a minute apart. Promoting on the first terminal verdict would mark a
+		// working model dead.
+		const first = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky')])
+		expect(first['m']?.health).toBe('flaky')
+		expect(first['m']?.terminalFailures).toBe(1)
+
+		const second = mergeHealth(first, [probe('m', 'MODEL_GONE', 'flaky')])
+		expect(second['m']?.health).toBe('dead')
+	})
+
+	test('a success clears both counters and revives a dead model', () => {
+		const dead = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky'), probe('m', 'MODEL_GONE', 'flaky')])
+		expect(dead['m']?.health).toBe('dead')
+
+		const revived = mergeHealth(dead, [probe('m', 'OK', 'ok')])
+		expect(revived['m']?.health).toBe('ok')
+		expect(revived['m']?.terminalFailures).toBe(0)
+		expect(revived['m']?.transientFailures).toBe(0)
+	})
+
+	test('a dead model keeps its verdict across a transient re-probe', () => {
+		const dead = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky'), probe('m', 'MODEL_GONE', 'flaky')])
+		const wobble = mergeHealth(dead, [probe('m', 'UPSTREAM', 'flaky')])
+		expect(wobble['m']?.health).toBe('dead')
+	})
+
+	test('a geo block condemns on the first hit', () => {
+		// A region block is deterministic for a given egress, unlike ModelError.
+		const once = mergeHealth({}, [probe('m', 'REGION_BLOCKED', 'dead')])
+		expect(once['m']?.health).toBe('dead')
+	})
+
+	test('transient outages never become dead', () => {
+		let state: HealthStore = {}
+		for (let i = 0; i < 5; i++) state = mergeHealth(state, [probe('m', 'UPSTREAM', 'flaky')])
+		expect(state['m']?.health).toBe('flaky')
+		expect(state['m']?.transientFailures).toBe(5)
+	})
+
+	test('lane-wide failures are never blamed on a model', () => {
+		// A broken shape gate or auth change fails every id at once; painting ❌
+		// across the roster there would be noise, not diagnosis.
+		expect(mergeHealth({}, [probe('m', 'SHAPE_REJECTED', 'unknown')])['m']?.health).toBe('unknown')
+		expect(mergeHealth({}, [probe('m', 'AUTH', 'unknown')])['m']?.health).toBe('unknown')
+	})
+
+	test('intermittent models keep a non-fatal mark', () => {
+		// ling-3.0-flash-fin-free answers 400 on this lane; it must never be ❌.
+		expect(mergeHealth({}, [probe('ling-3.0-flash-fin-free', 'REQUEST_REJECTED', 'unknown')])['ling-3.0-flash-fin-free']?.health).toBe('unknown')
 	})
 })

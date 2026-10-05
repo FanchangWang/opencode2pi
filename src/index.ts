@@ -31,6 +31,7 @@ import type { AssistantMessage, Context, Model, SimpleStreamOptions } from '@ear
 import type { ExtensionAPI, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
 import { discoverFreeModels } from './discovery.ts'
+import { handleCommand } from './commands.ts'
 import { classifyUpstreamFailure, formatFailure } from './errors.ts'
 import { PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
@@ -173,6 +174,11 @@ export default function (pi: ExtensionAPI): void {
 			for (const line of diagnostics) log?.info(`[${PROVIDER}] ${line}`)
 			return models
 		},
+	})
+
+	pi.registerCommand('opencode2pi', {
+		description: 'opencode2pi 诊断：doctor 检查形状闸门，status/probe 查看模型健康',
+		handler: handleCommand,
 	})
 
 	pi.logger.info(
