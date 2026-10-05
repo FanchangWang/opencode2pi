@@ -18,8 +18,8 @@ omp install npm:opencode2pi
 pi  install npm:opencode2pi
 
 # 不走 npm：钉到 release tag，可复现。注意：omp/pi 不支持 .tgz，只能用 git
-omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
-pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.0
+omp install git:https://github.com/FanchangWang/opencode2pi@v0.1.1
+pi  install git:https://github.com/FanchangWang/opencode2pi@v0.1.1
 
 # 追踪最新代码：装的是"此刻 main 指向的 commit"，之后不会自动更新，要更新就重跑这一行
 # 建议优先用 tag —— 上游随时可能改闸门，钉 tag 才能复现"当时能用"的状态

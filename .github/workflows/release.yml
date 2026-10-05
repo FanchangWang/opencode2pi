@@ -45,6 +45,21 @@ jobs:
           fi
           echo "releasing v$version"
 
+      # The git-install lines in README pin a tag, and nothing rewrites them:
+      # a release that forgot to bump them ships docs pointing at the previous
+      # release. It is checked here, where the failure is loud and still
+      # harmless — nothing has been published at this point. Recovery is to bump
+      # README.md and re-push the tag.
+      - name: Verify the README pin matches the package version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          stale="$(grep -oE '@v[0-9]+\.[0-9]+\.[0-9]+' README.md | grep -vx "@v$version" || true)"
+          if [ -n "$stale" ]; then
+            echo "::error::README.md pins $(echo "$stale" | tr '\n' ' ')but this release is v$version"
+            exit 1
+          fi
+          echo "README pins @v$version"
+
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
