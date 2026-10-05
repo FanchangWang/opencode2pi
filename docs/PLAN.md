@@ -1,25 +1,27 @@
-# PLAN — opencode2pi 实现方案
+# PLAN — 实现记录（已全部完成）
 
-**读者**：接手实现的 AI。**先读 `docs/FINDINGS.md`**，那里的实测结论是本方案的前提，不要重复推导。
+> **状态：T1–T6 全部实现并实测通过（2026-10-05，omp 18.6.1）。**
+> 本文件保留为**历史记录与验收标准**，不是待办清单。新的工作请直接写进
+> [`DEVELOPMENT.md`](DEVELOPMENT.md) 或 [`../AGENTS.md`](../AGENTS.md)。
 
-**当前状态**：`src/index.ts` 已经能跑通（见 §1）。T0 元数据契约探针已完成（见 §2）。**T1–T6 全部实现并实测通过**（2026-10-05）。
+要动手改这个项目，先读 [`../AGENTS.md`](../AGENTS.md)，再看
+[`FINDINGS.md`](FINDINGS.md)（实测结论，不要重新推导）。
 
 ---
 
 ## 0. 目标与非目标
 
-**目标**：在 omp / pi 里以原生扩展的形式提供 OpenCode Zen 匿名免费通道，零 API key、零登录、零子进程、零本地端口。
+**目标**：在 omp / pi 里以原生扩展的形式提供 OpenCode Zen 匿名免费通道，
+零 API key、零登录、零子进程、零本地端口。
 
-**非目标**：
-- 不做 DSH 插件（那是 `opencode2dsh` 的事，不要把它的 cordis / IP 池代码搬过来）。
-- 不做付费 Zen 通道（宿主 `opencode-zen` 已内建且更好）。
-- 不做 OpenAI/Anthropic 协议互转（宿主引擎已经处理）。
+**非目标**：不做 DSH 插件；不做付费 Zen 通道（宿主 `opencode-zen` 已内建且更好）；
+不做 OpenAI/Anthropic 协议互转（宿主引擎已处理）。
 
 ---
 
-## 1. 已验证的基线（不要改坏）
+## 1. 起点基线
 
-`src/index.ts` 当前实现，2026-10-05 在 omp 18.6.1 上实测：
+本方案开始时 `src/index.ts` 已能跑通，2026-10-05 实测：
 
 ```
 $ omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
@@ -27,29 +29,20 @@ Working...
 OK
 ```
 
-| 模型 | 结果 |
-| --- | --- |
-| `big-pickle` | ✅ |
-| `mimo-v2.5-free` | ✅ |
-| `mimo-v2.6-flash-free` | ✅ |
-| `nemotron-3.5-lightning-free` | ✅ |
-| `ling-3.0-flash-fin-free` | ⚠️ 上游间歇 503 —— **按用户决定保留在默认列表，不隐藏** |
+5 个硬编码模型 id（`big-pickle` / `mimo-v2.5-free` / `mimo-v2.6-flash-free` /
+`ling-3.0-flash-fin-free` / `nemotron-3.5-lightning-free`），其中
+`ling-3.0-flash-fin-free` 上游间歇 503 —— **按用户决定保留、不隐藏**。
 
-工具调用往返实测通过（注入的闸门桩没有劫持真实工具）。
+安装真实宿主类型包后 `tsc` 暴露了三个当时就存在的缺陷，已在 T1 一并修掉：
 
----
+1. 种子漏了 `contextWindow` / `maxTokens`，**所有模型都在跑宿主 128000/16384 兜底**
+2. `toolChoice` 被设在 `Context` 上，而引擎只读 `StreamOptions` 上的它
+3. 必填的 `cost.cacheRead` / `cacheWrite` 缺失
 
-## 2. T0 — 元数据契约探针（已完成）
-
-结论见 `FINDINGS.md` §7。三条直接影响后续设计：
-
-1. **扁平字段全部被采纳**：`contextWindow` / `maxTokens` / `cost` / `input` / `reasoning` / `thinking.efforts` 原样保留，宿主还会自动补 `Authorization`。
-2. **嵌套 `limits: { context, output }` 被静默忽略**，回落到 128000/16384 且不报错。→ **必须改名映射**。
-3. **静态 `models` 种子是必需的**：只有 `fetchDynamicModels` 时 `--model` 冷启动直接 `not found`。
 
 ---
 
-## 3. 任务清单
+## 2. 任务清单与验收
 
 ### T1 — 能力参数自动暴露 ✅ 已完成
 
@@ -168,7 +161,7 @@ omp **没有** DSH 那种网页设置页。可用的界面手段是斜杠命令 
 
 ---
 
-## 4. 实现顺序
+## 3. 实现顺序
 
 ```
 T1（能力参数）→ T2（列表发现）→ T3（session）→ T4（错误分类）
@@ -180,7 +173,7 @@ T5 的进阶版本（模型状态追踪）可以延后到 T6 之后。
 
 ---
 
-## 5. 明确不要做的事
+## 4. 明确不要做的事
 
 - ❌ **不要用 `pi.registerProvider` 的 `onPayload` / `prepareRequest`** —— 实测是哑字段，运行时永不触发（`FINDINGS.md` §3.1）。
 - ❌ **不要引入 `createProvider` / `openaiCompletions`** —— omp 内置的 pi-ai 1.x 里没有这两个导出。
@@ -193,34 +186,53 @@ T5 的进阶版本（模型状态追踪）可以延后到 T6 之后。
 
 ---
 
-## 6. 每一步都必须重跑的验证
+## 5. 每一步都必须重跑的验证
 
 ```sh
 cd C:/Users/guyue/code/opencode2pi
 
-# 冒烟：基础对话
+# 冒烟：基础对话           期望：输出恰好 OK
 omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
-# 期望：输出恰好 OK
 
-# 工具往返：闸门桩不能劫持真实工具
+# 工具往返：闸门桩不能劫持真实工具   期望：3
 mkdir -p /tmp/t && touch /tmp/t/a.txt /tmp/t/b.txt /tmp/t/c.txt
 omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle \
   "Use the bash tool to list the files in /tmp/t, then tell me exactly how many. Do not guess - run the command."
-# 期望：3
 
-# 类型检查
+# 类型检查 + 单测
 npx tsc --noEmit
+bun test
 ```
 
-三条全绿才算完成。**如果对话返回 403，先查 `FINDINGS.md` §2 的三个条件**，不要改别的地方。
+全绿才算完成。**如果对话返回 403，先查 `FINDINGS.md` §2 的三个条件**，不要改别的地方。
+
+额外的人工验收（不在自动化里，因为需要真实网络与交互式 TUI）：
+
+- 断网后仍可用，且能力参数是种子里的实测值，不是 128000/16384
+- 图片模型能接收图片附件，纯文本模型被明确拒绝
+- `/opencode2pi doctor` 在形状正常时报 ✅
+- `/opencode2pi probe` 能区分「确定死了」与「现在不行」
 
 ---
 
-## 7. 已决策 / 待决策
+## 6. 决策记录
 
-**已决策**：
-- `ling-3.0-flash-fin-free` **保留**在默认列表，不隐藏。
+### 已决策
 
-**待用户拍板**：
-1. 要不要支持付费 Zen？当前只做免费通道。
-2. 要不要做运行中出口轮换？代价见 `FINDINGS.md` §6，建议先不做。
+| 决策 | 内容 |
+| --- | --- |
+| 间歇模型不隐藏 | `ling-3.0-flash-fin-free` 保留在列表里，上游 503 只标注不隐藏 |
+| 健康只标注不隐藏 | 任何情况下都不用健康状态过滤模型列表 |
+| 一次失败不判死 | 连续两次 `ModelError` 才升级 ❌；任何一次成功清零（依据 `FINDINGS.md` §8.4） |
+| 地区封锁立即判死 | `REGION_BLOCKED` 对同一出口是确定性的，命中即 ❌ |
+| 通道级失败不记到模型 | `SHAPE_REJECTED` / `AUTH` 交给 doctor，不污染模型状态 |
+| 形状请求只有一份 | `doctor` 与健康探测共用 `src/gate.ts`，防止两者漂移后误报健康 |
+
+### 仍未决（用户未拍板）
+
+1. **要不要支持付费 Zen？** 当前只做免费通道。
+2. **要不要做运行中出口轮换？** 宿主代理是进程内缓存，运行时改环境变量不生效，
+   代价见 `FINDINGS.md` §6。建议先不做。
+3. **`UNAVAILABLE` 里的两个 id 是否还该继续隐藏？** 用户要求「绝不隐藏模型」，
+   当前理解为只针对健康标记；T2 阶段实测的 denylist 仍然生效。如需完全放开，改
+   `src/seed.ts` 即可。

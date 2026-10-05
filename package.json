@@ -14,7 +14,8 @@
     "pi-extension",
     "opencode",
     "opencode-zen",
-    "free-models"
+    "free-models",
+    "pi-package"
   ],
   "type": "module",
   "engines": {
@@ -29,6 +30,14 @@
     "extensions": [
       "./src/index.ts"
     ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
   },
   "files": [
     "src/"

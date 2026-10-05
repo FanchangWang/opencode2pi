@@ -1,0 +1,89 @@
+name: Release
+
+# Publishing is triggered by pushing a version tag. One `npm publish` serves both
+# hosts: pi (`pi install npm:opencode2pi`) and omp (`omp install npm:opencode2pi`)
+# both resolve extensions out of the npm registry, and the pi.dev package gallery
+# indexes npm rather than having a registry of its own.
+#
+# Required repository secret: NPM_TOKEN (an npm automation token with publish
+# access to this package).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # npm provenance attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      # `npm test` runs `bun test`; bun is not on stock runners.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # A tag that disagrees with package.json is the failure mode that silently
+      # publishes the wrong version, so it is checked before anything else.
+      - name: Verify the tag matches the package version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          echo "releasing v$version"
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      # The extension is multi-module, so a tarball missing any of src/ fails
+      # only at the user's first command. Assert the payload here instead.
+      - name: Verify the published tarball
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --silent)"
+          # `tar` output carries CRLF on Windows checkouts; strip it so the
+          # exact-match assertions below hold on every runner.
+          contents="$(tar -tzf "$tarball" | tr -d '\r')"
+          echo "$contents"
+          for required in \
+            package/src/index.ts \
+            package/src/commands.ts \
+            package/src/discovery.ts \
+            package/src/doctor.ts \
+            package/src/errors.ts \
+            package/src/gate.ts \
+            package/src/health.ts \
+            package/src/host.d.ts \
+            package/src/metadata.ts \
+            package/src/seed.ts \
+            package/src/session.ts; do
+            echo "$contents" | grep -qx "$required" || { echo "::error::$required missing from tarball"; exit 1; }
+          done
+          rm -f "$tarball"
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            || gh release edit "$GITHUB_REF_NAME" --generate-notes

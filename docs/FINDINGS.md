@@ -202,3 +202,90 @@ opencode-zen (112) ...
 ```
 
 扩展 `headers` 里写的内容会被保留并与之合并。
+
+---
+
+## 8. 实现期新增的实测结论（2026-10-05，T2–T5）
+
+### 8.1 models.dev `opencode` provider 的字段形状
+
+免费判定和能力映射都靠它。关键点：
+
+```jsonc
+{
+  "limit": { "context": 200000, "output": 32000 },
+  "cost":  { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
+  "modalities": { "input": ["text", "image", "audio", "video"] },
+  "reasoning": true,
+  "reasoning_options": [],
+  "deprecated": null
+}
+```
+
+`limit.context` / `limit.output` 必须改名映射成 `contextWindow` / `maxTokens`，
+原因见 §7.2。
+
+`reasoning_options` 是**数组**，形态不止一种，只有第一种能映射到宿主的 `thinking.efforts`：
+
+| 形态 | 处理 |
+| --- | --- |
+| `{type:'effort', values:[...]}` | → `thinking.efforts`；宿主只认 `minimal/low/medium/high/xhigh/max`，其余必须过滤 |
+| `{type:'toggle'}` | 不给 `thinking`，让宿主从 `reasoning:true` 派生。给空数组会违反宿主契约 |
+| `{type:'budget_tokens', ...}` | 同上 |
+
+### 8.2 免费池的真实规模：必须和实时列表求交集
+
+```
+Zen /v1/models 在售          86
+models.dev 里 0 元           36
+两者交集（真正的免费池）      13
+```
+
+**只看价格会多出 23 个已下架的 id。**「在售」必须由 S1 提供，元数据只负责判免费。
+另有 `jev-1.13-free` 在售但 models.dev 完全没有条目 —— 这是「元数据缺失时回退名字启发式」
+的真实用例，不是理论构造。
+
+### 8.3 宿主 `options.sessionId` 确实存在（dump 实测）
+
+dump 自定义 API handler 的运行时 `options`：
+
+```
+sessionId       = "01a10bfe-9111-744a-8200-d1d09389c7f7"
+metadata.user_id = {"session_id":"01a10bfe-9111-744a-8200-d1d09389c7f7"}
+fetch           = [function]
+```
+
+两个字段**都不在**发布的 `SimpleStreamOptions` 类型里，只能运行时收窄读取。
+`context.tools` 实测已包含宿主的真实 `bash` / `read`，所以闸门桩在正常路径上是 no-op。
+
+### 8.4 `401 ModelError` 在这条通道上会翻转
+
+逐模型探测实测（同一分钟内的两次独立请求）：
+
+```
+nemotron-3.ultra-free   第一次  HTTP 401 ModelError
+nemotron-3.ultra-free   第二次  HTTP 200
+```
+
+**所以「一次 ModelError 即判定模型已死」是错的**，会把能用的模型划掉。
+必须连续两次才升级，且任何一次成功清零。同一批探测还确认了
+`deepseek-v4-flash-free` 稳定 400（opencode2dsh 当年留下的那个确实已死），
+`muse-spark-1.3-contributor-free` 是 `403 RegionError`。
+
+### 8.5 `Endpoint is unavailable` 同时表示 400 和 5xx
+
+给只支持文本的模型发图片，上游返回的是：
+
+```
+400 ... Upstream request failed: Endpoint is unavailable.
+```
+
+而上游真故障时也可能是同一句话，只是状态码不同。**必须以状态码判别**，
+否则会把「这个请求永远不可能成功」误报成「稍后重试」。
+
+### 8.6 打包与分发
+
+- pi 与 omp **都从 npm 解析扩展**，一次 `npm publish` 同时服务两边；pi.dev 的包目录是索引 npm，没有独立 registry
+- npm 上带 `pi-package` keyword 才进 pi 的包目录
+- 宿主包（`@earendil-works/pi-ai`）必须声明为 `peerDependencies` 且**不能打包进去** —— 物理副本会绕过宿主的模块映射，制造重复的 registry 实例
+- 实测 `omp install .` 后**不带 `-e`** 也能加载并正常对话
