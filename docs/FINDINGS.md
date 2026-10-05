@@ -114,3 +114,91 @@ pi生态里已有4 个相关包，**没有一个能直接用**：
 - omp 的 provider 代理查找**进程内缓存**，运行时改环境变量**不会**生效；
 - 要做运行中轮换，只能自己接管 fetch / 用 `registerCustomApi` 里持有的 transport；
 - 宿主已支持 `NO_PROXY` 与私网/回环豁免，不要破坏。
+
+---
+
+## 7. 扩展 provider 的模型元数据契约（2026-10-05 实测）
+
+方法：注册一个 provider，`fetchDynamicModels` 返回带特征值的假模型（`contextWindow: 999999` 等），在自定义 API handler 里把**宿主解析后的 model 对象**dump 出来比对。
+
+### 7.1 被采纳的字段（扁平形式，全部原样保留）
+
+```ts
+fetchDynamicModels: async () => [{
+  id: 'probe-alpha',
+  name: 'Probe Alpha',
+  contextWindow: 999_999,             // ✅ 原样采纳
+  maxTokens: 12_345,                  // ✅ 原样采纳
+  cost: { input: 7.5, output: 9.25 },// ✅ 原样采纳
+  input: ['text', 'image'],           // ✅ 采纳 → 图片输入放行
+  reasoning: true,                    // ✅ 采纳，并派生 thinking
+}]
+```
+
+宿主解析后的对象：
+
+```json
+{
+  "contextWindow": 999999,
+  "maxTokens": 12345,
+  "cost": { "input": 7.5, "output": 9.25 },
+  "input": ["text", "image"],
+  "reasoning": true,
+  "thinking": { "mode": "effort", "efforts": ["minimal","low","medium","high"] }
+}
+```
+
+`thinking.efforts` 显式声明时按声明保留（实测 `['off','low','high']` 原样通过）；只给 `reasoning: true` 时宿主自动派生 `mode: 'effort'` + 四档默认 effort。
+
+### 7.2 嵌套 `limits` 形式被静默忽略 ⚠️
+
+```ts
+{ id: 'probe-beta', limits: { context: 888_888, output: 8_888 } }  // ❌ 无效
+```
+
+解析结果回落到宿主通用默认值，且**没有任何报错或告警**：
+
+```json
+{ "contextWindow": 128000, "maxTokens": 16384 }
+```
+
+models.dev 的原始字段名是 `limit.context` / `limit.output`，所以**必须显式改名映射**为 `contextWindow` / `maxTokens`。直接透传 models.dev 的形状会让 omp 拿到偏小的默认值 —— 这正是「模型能力没暴露就静默用默认值」的失败模式。
+
+### 7.3 静态 `models` 种子是必需的
+
+只提供 `fetchDynamicModels` 而不给静态 `models` 列表时：
+
+```
+$ omp -e ./probe.ts -p --model zen-fieldprobe/probe-alpha "hi"
+Model "zen-fieldprobe/probe-alpha" not found     ← 0.6s 内直接失败
+```
+
+加上 `models: [PROBE_ALPHA, PROBE_BETA]` 静态种子后同一命令正常发出请求。
+
+即：**异步发现的结果在冷启动时来不及参与 `--model` 解析。** 扩展必须同时提供静态种子列表，动态发现只负责更新它。这与内建 `opencode-go` 的 `dynamicModelsAuthoritative: true` + 捆绑 seed 是同一套机制。
+
+### 7.4 `omp models` CLI 不列出扩展 provider
+
+```
+$ omp models -e ./probe.ts
+agnes (2) ...
+opencode-zen (112) ...
+```
+
+扩展注册的 provider 完全不出现（带 apiKey 与 `auth: 'none'` 两种情况都试过）。但 `/model` 选择器和 `--model provider/id` 都能正常解析并使用。
+
+后果：**用户不能用 `omp models` 查这个 provider 的清单**，`--provider` 也会报 `Unknown provider`。这是可用性上的真实短板，也说明 T3（`/opencode2pi` 命令）有实际价值。
+
+### 7.5 宿主自动注入 Authorization
+
+`apiKey: 'public'` + `authHeader: true` 时，宿主自动把凭据加进请求头，扩展不需要自己拼：
+
+```json
+"headers": {
+  "x-opencode-client": "cli",
+  "x-opencode-session": "ses_0123456789abABCDEFGHIJKLMN",
+  "Authorization": "Bearer public"
+}
+```
+
+扩展 `headers` 里写的内容会被保留并与之合并。

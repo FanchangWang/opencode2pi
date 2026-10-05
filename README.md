@@ -24,11 +24,13 @@ OK
 | `mimo-v2.5-free` | ✅ 可用 |
 | `mimo-v2.6-flash-free` | ✅ 可用 |
 | `nemotron-3.5-lightning-free` | ✅ 可用 |
-| `ling-3.0-flash-fin-free` | ⚠️ 上游间歇 503 |
+| `ling-3.0-flash-fin-free` | ⚠️ 上游间歇 503（保留，不隐藏） |
 
 工具调用往返实测通过。
 
-**尚未完成**：模型目录动态发现、错误分类、session 亲和、打包发布、单元测试 —— 见 [`docs/PLAN.md`](docs/PLAN.md)。
+**尚未完成**：模型能力参数自动暴露、免费模型列表动态发现、session 亲和、错误分类、`/opencode2pi` 诊断命令 —— 见 [`docs/PLAN.md`](docs/PLAN.md)。
+
+宿主模型元数据契约已实测确认（含一个会静默失效的坑），见 [`docs/FINDINGS.md` §7](docs/FINDINGS.md)。
 
 ---
 
@@ -46,6 +48,7 @@ cp src/index.ts ~/.omp/agent/extensions/opencode2pi.ts
 ```
 
 > 用 `--model <provider>/<model>`，**不要**用 `--provider` —— 扩展注册的 provider 在参数校验阶段还不可见，会报 `Unknown provider`。
+> 同理，`omp models` **不列出**扩展注册的 provider（实测），查清单请用会话内的 `/model`。
 
 ---
 

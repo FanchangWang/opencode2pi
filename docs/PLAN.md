@@ -2,7 +2,7 @@
 
 **读者**：接手实现的 AI。**先读 `docs/FINDINGS.md`**，那里的实测结论是本方案的前提，不要重复推导。
 
-**当前状态**：`src/index.ts` 已经能跑通（见下方「已验证」）。本方案覆盖的是从「最小可用」到「可发布」的剩余工作。
+**当前状态**：`src/index.ts` 已经能跑通（见 §1）。T0 元数据契约探针已完成（见 §2）。本方案覆盖剩余工作。
 
 ---
 
@@ -11,7 +11,7 @@
 **目标**：在 omp / pi 里以原生扩展的形式提供 OpenCode Zen 匿名免费通道，零 API key、零登录、零子进程、零本地端口。
 
 **非目标**：
-- 不做 DSH 插件（那是 `opencode2dsh` 的事，不要把它的 cordis/IP 池代码搬过来）。
+- 不做 DSH 插件（那是 `opencode2dsh` 的事，不要把它的 cordis / IP 池代码搬过来）。
 - 不做付费 Zen 通道（宿主 `opencode-zen` 已内建且更好）。
 - 不做 OpenAI/Anthropic 协议互转（宿主引擎已经处理）。
 
@@ -33,125 +33,157 @@ OK
 | `mimo-v2.5-free` | ✅ |
 | `mimo-v2.6-flash-free` | ✅ |
 | `nemotron-3.5-lightning-free` | ✅ |
-| `ling-3.0-flash-fin-free` | ⚠️ 上游 503 间歇 |
+| `ling-3.0-flash-fin-free` | ⚠️ 上游间歇 503 —— **按用户决定保留在默认列表，不隐藏** |
 
-工具调用往返实测通过：让模型用 bash 列目录并报数，返回正确（`a.txt b.txt c.txt` → `3 files`），注入的闸门桩没有劫持真实工具。
-
-**改任何东西之后，必须重跑这两条验证**（见 §5）。
+工具调用往返实测通过（注入的闸门桩没有劫持真实工具）。
 
 ---
 
-## 2. 任务清单
+## 2. T0 — 元数据契约探针（已完成）
 
-### T1 — 模型目录动态发现（替换静态列表）
+结论见 `FINDINGS.md` §7。三条直接影响后续设计：
 
-**问题**：当前 `FREE_MODELS` 是 7 个静态 id。免费池轮换频繁，静态列表必然过期。
+1. **扁平字段全部被采纳**：`contextWindow` / `maxTokens` / `cost` / `input` / `reasoning` / `thinking.efforts` 原样保留，宿主还会自动补 `Authorization`。
+2. **嵌套 `limits: { context, output }` 被静默忽略**，回落到 128000/16384 且不报错。→ **必须改名映射**。
+3. **静态 `models` 种子是必需的**：只有 `fetchDynamicModels` 时 `--model` 冷启动直接 `not found`。
 
-**要做**：把 `opencode2dsh/src/adapter/catalog.ts` 的三级回退链移植到 `fetchDynamicModels`：
+---
 
-```
-S1  GET {zen}/v1/models              → 实时在售 id 集合
-S2  GET https://models.dev/api.json  → 定价元数据 → 免费判定
-S3  FREE_MODELS 静态兜底（已验证可用）
-```
+## 3. 任务清单
 
-免费判定规则（照抄 `catalog.ts` 的 `decide`，注意**顺序**）：
-- 元数据就绪时，**元数据判定永远优先**（含 `deprecated` → 拒绝）；
-- 只有元数据不可用（pending / 该 model 缺失）时，才回退到名字启发式 `id.includes('free')`；
-- S3 静态名单里的 `big-pickle` 不含 `free` 字样，靠元数据判定；元数据不可用时它会被名字兜底漏掉 —— 需要给静态名单单独打一个 `verified: true` 标记让它无条件放行。
+### T1 — 能力参数自动暴露（优先级最高）
 
-**约束**：
-- `fetchDynamicModels` 有 **15 秒硬超时**（宿主 `RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS`），且默认 **24 小时 TTL** 缓存。两级网络请求（Zen + models.dev）必须并发，不能串行。
-- models.dev 响应很大（7MB量级），只取需要的字段，不要整份留在内存里。
-- 返回给宿主的模型对象需要 `id` / `name` / `reasoning` / `input`。`input` 决定图片附件是否放行 —— models.dev 的 `modalities.input` 含 `image` 才放行，否则退回 `['text']`。
+**为什么排第一**：它和 T2 共用同一次 models.dev 解析，分开做等于解析两遍；而且能力参数缺失比列表过期更隐蔽 —— 列表少一个模型用户会换，`contextWindow` 算错会让请求在十万 token 处莫名截断，用户根本不知道该去哪查。
+
+**输入**：models.dev `api.json` 的每个模型条：
+
+| models.dev 字段 | → 扩展返回字段 |
+| --- | --- |
+| `limit.context` | `contextWindow` |
+| `limit.output` | `maxTokens` |
+| `cost.input` / `cost.output` | `cost.input` / `cost.output` |
+| `modalities.input` | `input`（含 `image` 才放行图片） |
+| `reasoning` | `reasoning` |
+| `reasoning_options.effort_values` | `thinking.efforts` |
+
+**规则**：
+- 字段缺失或非法时**必须显式落到保守默认值并记录原因**，不要让宿主静默兜底 —— 静默兜底是 `FINDINGS.md` §7.2 那个坑。
+- `maxTokens` 不能超过 `contextWindow`（宿主会 clamp，但自己夹一次更可控）。
+- 元数据整体不可用时，退回 `src/index.ts` 里已验证的静态种子（那 5 个 id 的参数是实测过的）。
 
 **验收**：
-1. 临时把网络断掉，`fetchDynamicModels` 仍返回 5 个静态模型（走 S3）。
-2. `GET /zen/v1/models` 返回的付费模型（如 `claude-opus-5`）**不出现在**最终列表里。
-3. 断网 → 恢复后，列表能刷新出新模型。
+1. 临时断网，仍能用且参数是静态种子的值，不是 128000/16384。
+2. 断网 → 恢复后列表与参数都刷新。
+3. 一个声明 `modalities.input: ["text","image"]` 的模型能接收图片附件；只声明 `text` 的被拒绝。
 
-### T2 — 错误分类
+### T2 — 免费模型列表自动发现
 
-**问题**：宿主会把上游错误直接透传，用户看到 `Error from provider (Console): ...` 这种无信息量的文本。
+**问题**：当前 7 个 id 硬编码。免费池轮换频繁。
 
-**要做**：在自定义 API handler 里包装错误，至少区分这几类（依据 `FINDINGS.md` §2 的实测表）：
+**要做**：三级回退，但要按宿主的约束改写，**不要照抄 opencode2dsh**：
 
-| 上游形态 | 归类 | 展示给用户 |
+```
+S1  GET {zen}/v1/models              → 实时在售 id（含全部付费模型）
+S2  models.dev 定价元数据            → 免费判定（与 T1 同一次请求）
+S3  src/index.ts 里已验证的静态种子   → 兜底
+```
+
+**宿主约束（`FINDINGS.md` §7）**：
+- `fetchDynamicModels` 有 **15 秒硬超时**（`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS`），超时即失败。**两级请求必须并发**。
+- 更稳的设计：models.dev 本地长期缓存（日更都不到），每次只打 Zen 实时列表，15 秒预算绰绰有余。
+- **必须同时提供静态 `models` 种子**，否则冷启动 `--model` 直接 `not found`。
+
+**免费判定顺序（最容易写反的地方）**：
+1. 元数据就绪 → **元数据判定永远优先**，`deprecated` 要能**否决**一个名字里带 `free` 的模型；
+2. 元数据不可用（pending / 该 model 缺失）→ 才回退到名字启发式 `id.includes('free')`；
+3. 静态种子里的已验证 id（如 `big-pickle`，名字里没有 `free`）需要单独标记，无条件放行。
+
+**为什么第 1 条重要**：`opencode2dsh` 明确记录过 `deepseek-v4-flash-free` 因为「先判名字」而永远留在列表里，尽管上游早已返回 400 "Model is unavailable"。
+
+**验收**：
+1. `GET /zen/v1/models` 返回的付费模型（如 `claude-opus-5-5`）**不出现在**最终列表里。
+2. 断网 → 恢复后能自动出现新模型。
+3. 冷启动 `--model opencode-zen-free/<新模型>` 可用（验证种子机制）。
+
+### T3 — session id 按会话亲和
+
+**问题**：当前 `SESSION` 是**进程级常量**，同进程内所有会话共用一个 session id。上游按 session 做 prompt cache 亲和，共用会互相污染。
+
+**要做**：能拿到会话标识就按会话派生，拿不到就退回进程级。
+- **先探测**自定义 API handler 的 `options` 里有没有会话字段（`sessionId` / `conversationId` 之类）。不要假设。
+- 派生照抄 `src/index.ts` 的 `canonicalSessionID`。
+
+**验收**：同进程内两个会话的 session id 不同；同一会话多轮之间稳定。
+
+### T4 — 错误分类
+
+上游错误目前原样透传，用户看到的是 `Error from provider (Console): ...`。在自定义 API handler 里包装：
+
+| 上游形态 | 归类 | 展示 |
 | --- | --- | --- |
-| 403 `FreeTierError` | `SHAPE_REJECTED` | 「上游形状闸门拒绝，通常意味着闸门条件被破坏 —— 这是 bug，请提issue」 |
+| 403 `FreeTierError` | `SHAPE_REJECTED` | 「上游形状闸门拒绝，通常是本扩展的 bug，请提 issue」 |
 | 403 `RegionError` | `REGION_BLOCKED` | 「该模型在当前网络地区不可用」（**不要**说成凭据问题） |
 | 401 `ModelError` | `MODEL_GONE` | 「模型已下线」 |
-| 401 / 403 其他 | `AUTH` | 匿名通道理论上不该出现 |
 | 429 | `RATE_LIMIT` | 「匿名配额按出口 IP 限流」 |
 | 5xx | `UPSTREAM` | 「上游暂时不可用」 |
 
-注意：`RegionError` 的判定必须在 `AUTH` **之前**，否则地区封锁会被误报成「API key 无效」。这是 `opencode2dsh` 0.3.5 修过的同一个 bug。
+`RegionError` 的判定必须在 `AUTH` **之前** —— 否则地区封锁会被误报成「API key 无效」。这是 `opencode2dsh` 0.3.5 修过的同一个 bug。
 
-**验收**：用一个已知会触发 `RegionError` 的模型（`muse-spark-1.2-contributor-free`，手动指定测试）观察输出文案。
+### T5 — `/opencode2pi` TUI 命令（可选，非强制）
 
-### T3 — session id 亲和性
+omp **没有** DSH 那种网页设置页。可用的界面手段是斜杠命令 + TUI：
 
-**问题**：当前 `SESSION` 是**进程级常量**，同一个进程内所有会话共用一个 session id。上游按 session 做 prompt cache 亲和，共用会互相污染。
+| 手段 | 用途 |
+| --- | --- |
+| `pi.registerCommand` | `/opencode2pi` |
+| `ctx.ui.select` | 交互式菜单 |
+| `ctx.ui.notify` | 状态提示 |
+| `setWidget` / `setHookWidget` | 输入框上方/下方常驻 widget |
 
-**要做**：能拿到会话标识就按会话派生，拿不到就退回进程级。
-- 先确认自定义 API handler 的 `options` 里有没有会话 id（`sessionId` / `conversationId` 之类）。**先探测再写代码**，不要假设。
-- 派生方式照抄 `opencode2dsh/src/adapter/ids.ts` 的 `canonicalSessionID`：对信号做 SHA-256，取前 12字节 hex 作时间部分，后 10 字节转 14 位 base62。
+先例：`opencode-pi` 的 `/opencode-pi status` 就是这个形态。
 
-**验收**：同一进程内开两个会话抓包，两个 session id 不同；同一会话多轮之间 session id 稳定。
+**最小版本（推荐先做这个）**：`/opencode2pi doctor` —— 发一个最小闸门形状请求并分类报错。
 
-### T4 — 打包与分发
+理由：形状闸门是本扩展**硬编码**的东西，上游一改就全线 403 且无任何提示。上游三周内改了三次策略，这个自检把「静默失效」变成「明确告警」，价值高于模型标记。
 
-**要做**：
-- `package.json` 已有 `pi.extensions` / `omp.extensions` 双 manifest，确认 `pi install npm:opencode2pi` 与 `omp -e ./src/index.ts` 两条路都通。
-- `pi.dev` 包页面（`https://pi.dev/packages`）能收录：需要 `description`、仓库链接、许可证。
-- 补 `.npmignore` 或确认 `files` 字段只发 `src/`（这个包零依赖，很小）。
-- README 要写清楚**这是匿名免费通道，上游随时可能改闸门或关停**，并附上 `FINDINGS.md` §2 的三个条件，方便用户自行排障。
+**进阶版本**：用 `pi.on('after_provider_response')`（带 `{ status, headers }` 和 `ctx.model`）记录每模型成败历史，在菜单里显示 `✅ 可用 / ⚠️ 503 间歇 / ❌ 403 地区封锁 / ❓ 未测试`，并支持用户手动标记。按用户要求：**模型照样列在选择器里，只加状态标注，不隐藏**。
 
-**验收**：干净profile 里 `pi install` 后 `/model` 能看到 `opencode-zen-free` 分组。
+**唯一真实风险**：用户标记的**持久化途径未验证**。omp 的 settings 是宿主定义的类型化句柄（`lookup(id)` 对未知 id 返回 `undefined`），扩展能否注册自己的 settings id 不确定。备选：写 JSON 到 agent 目录。**先验证再实现**，否则用户标记重启即丢。
 
-### T5 — 单元测试
+### T6 — 打包与分发
 
-宿主自带 `bun test`。至少覆盖：
-
-1. `canonicalSessionID` —— 输出**永远**匹配 `/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/`；已是规范格式的输入原样透传。
-2. `withGateTools` —— 空 tools 时注入 `bash`+`read` 且 `toolChoice === 'none'`；已有同名工具时不重复注入；宿主有工具时 `toolChoice` 保持原值不被覆盖。
-3. 静态目录里的每个 id 都在 `UNAVAILABLE` 之外。
-4. models.dev 解析：`cost=0 && !deprecated` → 免费；`deprecated` → 拒绝；缺失 → 走名字兜底。**顺序要测到**，这是最容易写反的地方。
-
-不要为「转发是否发生」这类接线行为写测试 —— 那是 throwaway script 的活。
+- `package.json` 的 `pi.extensions` / `omp.extensions` 双 manifest 已在位，确认 `pi install npm:opencode2pi` 与 `omp -e ./src/index.ts` 两条路都通。
+- 补 README：**这是匿名免费通道，上游随时可能改闸门或关停**；附 `FINDINGS.md` §2 的三个条件供用户排障。
+- **必须在 README 写明 `omp models` 看不到这个 provider**（`FINDINGS.md` §7.4），用 `/model` 或 `--model provider/id`。
 
 ---
 
-## 3. 实现顺序建议
+## 4. 实现顺序
 
 ```
-T5 的 1、2 两项（纯函数测试）
-   ↓
-T3（先探测 options 里的会话字段）
-   ↓
-T1（目录发现，最大的一块）
-   ↓
-T2（错误分类）
-   ↓
-T4（打包）+ T5 剩余
+T1（能力参数）→ T2（列表发现）→ T3（session）→ T4（错误分类）
+                                                          ↓
+                                              T5 doctor → T6 打包
 ```
 
-T1 是唯一有真实设计难度的；其余都是机械工作。
+T5 的进阶版本（模型状态追踪）可以延后到 T6 之后。
 
 ---
 
-## 4. 明确不要做的事
+## 5. 明确不要做的事
 
 - ❌ **不要用 `pi.registerProvider` 的 `onPayload` / `prepareRequest`** —— 实测是哑字段，运行时永不触发（`FINDINGS.md` §3.1）。
 - ❌ **不要引入 `createProvider` / `openaiCompletions`** —— omp 内置的 pi-ai 1.x 里没有这两个导出。
 - ❌ **不要改 JSON body** —— handler 拿到的是结构化 `context`，加在 `context.tools` 上。
-- ❌ **不要 spawn 子进程** —— 那是 `opencode-pi` 的路线，本项目走原生 HTTP，零进程。
-- ❌ **不要移植 `opencode2dsh` 的 IP 池** —— 除非用户明确要求；宿主已有 `PI_PROXY_<PROVIDER>`，且进程内缓存导致运行时轮换不可行（`FINDINGS.md` §6）。
-- ❌ **不要照抄 DSH 侧的错误重试策略** —— 匿名通道重试轰炸会挤掉自己的配额。
+- ❌ **不要返回嵌套 `limits`** —— 静默失效（`FINDINGS.md` §7.2）。
+- ❌ **不要只给 `fetchDynamicModels` 不给静态种子** —— 冷启动 `--model` 直接失败（§7.3）。
+- ❌ **不要 spawn 子进程** —— 那是 `opencode-pi` 的路线，本项目走原生 HTTP。
+- ❌ **不要移植 `opencode2dsh` 的 IP 池** —— 宿主已有 `PI_PROXY_<PROVIDER>`，且进程内缓存导致运行时轮换不可行（`FINDINGS.md` §6）。
+- ❌ **不要照抄 DSH 侧的重试策略** —— 匿名通道重试轰炸会挤掉自己的配额。
 
 ---
 
-## 5. 每一步都必须重跑的验证
+## 6. 每一步都必须重跑的验证
 
 ```sh
 cd C:/Users/guyue/code/opencode2pi
@@ -174,8 +206,11 @@ npx tsc --noEmit
 
 ---
 
-## 6. 需要用户拍板的决策点
+## 7. 已决策 / 待决策
 
-1. **要不要支持付费 Zen？** 当前只做免费通道。宿主 `opencode-zen` 已内建付费支持，但如果要做「免费 + 付费统一入口」需要额外设计。
-2. **要不要做运行中出口轮换？** 代价见 `FINDINGS.md` §6 —— 要自己接管 transport，且实现复杂度远超收益。建议先不做，用户抱怨限流再说。
-3. **`ling-3.0-flash-fin-free` 留不留？** 实测上游 503 间歇，留在默认列表里会让用户以为是自己配错了。建议移到可选列表。
+**已决策**：
+- `ling-3.0-flash-fin-free` **保留**在默认列表，不隐藏。
+
+**待用户拍板**：
+1. 要不要支持付费 Zen？当前只做免费通道。
+2. 要不要做运行中出口轮换？代价见 `FINDINGS.md` §6，建议先不做。
