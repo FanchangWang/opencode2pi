@@ -86,18 +86,42 @@ jobs:
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::NPM_TOKEN is not configured; skipping npm publish. The GitHub release and git install still work."
+            echo "::notice::No NPM_TOKEN; the publish step will try OIDC trusted publishing. If no trusted publisher is configured on npmjs.com, the publish fails but the GitHub release is still produced."
           fi
 
-      # Only the npm step is conditional. If it is skipped or fails, the tag and
+      # Two authentication paths, in npm's own order of preference:
+      #   NPM_TOKEN present  → token auth, provenance generated via the flag
+      #   otherwise         → OIDC trusted publishing, which the npm CLI
+      #                       auto-detects; provenance is generated
+      #                       automatically, so --provenance must be omitted
+      #                       (it is redundant, not harmful, but says nothing
+      #                       true about who actually authenticated).
+      #
+      # Only this step is conditional. If it is skipped or fails, the tag and
       # the release must still be produced: pi and omp both install from a git
       # ref, so a release without npm is a complete, usable distribution.
       - name: Publish to npm
         id: publish
-        if: steps.npm.outputs.available == 'true'
-        run: npm publish --provenance --access public
         env:
+          TOKEN_AUTH: ${{ steps.npm.outputs.available }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${TOKEN_AUTH:-false}" = "true" ]; then
+            echo "Authenticating with NPM_TOKEN."
+            npm publish --provenance --access public
+          else
+            echo "No NPM_TOKEN; using OIDC trusted publishing."
+            # Trusted publishing requires npm >= 11.5.1. The runner ships a
+            # recent npm, but failing here with a clear message beats failing
+            # later with an opaque ENEEDAUTH.
+            version="$(npm --version)"
+            if [ "$(printf '%s\n%s\n' "$version" 11.5.1 | sort -V | head -n1)" != "11.5.1" ]; then
+              echo "::error::npm $version cannot use OIDC trusted publishing; 11.5.1 or newer is required."
+              exit 1
+            fi
+            npm publish --access public
+          fi
 
       - name: Create the GitHub release
         if: always()
@@ -105,12 +129,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARBALL: ${{ env.TARBALL }}
           NPM_PUBLISHED: ${{ steps.publish.outcome == 'success' }}
+          TOKEN_AUTH: ${{ steps.npm.outputs.available }}
         run: |
           notes="$(mktemp)"
           if [ "${NPM_PUBLISHED:-}" = "true" ]; then
-            printf 'Published to npm as `opencode2pi@%s`.\n\n' "${GITHUB_REF_NAME#v}" > "$notes"
+            if [ "${TOKEN_AUTH:-false}" = "true" ]; then
+              printf 'Published to npm as `opencode2pi@%s` (authenticated with `NPM_TOKEN`).\n\n' "${GITHUB_REF_NAME#v}" > "$notes"
+            else
+              printf 'Published to npm as `opencode2pi@%s` (authenticated with OIDC trusted publishing).\n\n' "${GITHUB_REF_NAME#v}" > "$notes"
+            fi
+          elif [ "${TOKEN_AUTH:-false}" = "true" ]; then
+            printf '**npm publish failed for this tag** (NPM_TOKEN authentication).\n\n' > "$notes"
           else
-            printf '**npm was not published for this tag** (no `NPM_TOKEN` secret).\n\n' > "$notes"
+            printf '**npm was not published for this tag** (no `NPM_TOKEN` secret and OIDC trusted publishing is not configured for this package).\n\n' > "$notes"
           fi
           cat >> "$notes" <<'EOF'
           Install:

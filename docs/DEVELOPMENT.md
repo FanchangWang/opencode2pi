@@ -159,21 +159,42 @@ bun test
 打 `vX.Y.Z` tag 触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：
 
 校验 tag 与 `package.json` 版本一致 → `npm ci` → typecheck → test →
-校验 tarball 产物完整 → `npm publish --provenance` → 建 GitHub Release。
+校验 tarball 产物完整 → 发布 npm → 建 GitHub Release。
 
-若仓库没有配 `NPM_TOKEN`，workflow 会**跳过 npm 发布但照常产出 tag 和 Release**，
-release notes 会明确写明 npm 未发布。因为 pi/omp 都能从 git ref 安装，
-此时 `omp install git:https://github.com/FanchangWang/opencode2pi@vX.Y.Z` 仍然可用。
+### 两种认证方式，workflow 自动二选一
 
-宿主**不支持**直接安装 `.tgz` 文件（实测报 `package.json not found`），
-支持的源是：npm spec、git ref、`https://` 仓库地址、本地目录。
-所以 release 里的 tarball 附件只作存档，不是安装路径。
+| 条件 | 走哪条路 | 命令 |
+| --- | --- | --- |
+| 存在 `NPM_TOKEN` secret | token 认证 | `npm publish --provenance --access public` |
+| 没有 secret | OIDC Trusted Publishing | `npm publish --access public` |
 
-一次 `npm publish` 同时服务两个宿主：`pi install npm:opencode2pi` 和
-`omp install npm:opencode2pi` 都从 npm 解析，pi.dev 的包目录也是索引 npm，
-没有独立 registry。
+OIDC 路径下 npm CLI 会自动检测 CI 环境并改用短期凭据；**provenance 也由 npm 自动生成**，
+所以那条路径不加 `--provenance`。选 OIDC 前会先检查 `npm >= 11.5.1`，不够就明确报错，
+而不是让发布挂在后面报一个看不懂的 ENEEDAUTH。
 
-需要在仓库 secret 里配 `NPM_TOKEN`。
+**Release 步骤始终执行**（`if: always()`），且 notes 会写明这次有没有发上 npm、
+走的是哪条认证路径。
+
+### 首次发布必须用一次 token
+
+Trusted Publisher 是在 npmjs.com 的**包的 Settings 页面**里配置的，包还不存在时
+没有这个页面。所以第一次发布只能用 token（创建 token 时需要勾 2FA bypass）。
+配好 Trusted Publisher 后就可以删掉 `NPM_TOKEN` secret，workflow 不用再改。
+
+### ⚠️ 配置 Trusted Publisher 时必须勾 "Allow npm publish"
+
+2026-09-03 之后新建的 Trusted Publisher 配置**默认只允许 `npm stage publish`**，
+是否同时允许直接 `npm publish` 需要手动勾选。本项目用的是 `npm publish`，不勾就会发布失败。
+而 **npm 保存配置时不校验**，错误只在真正发布那一刻才暴露。
+
+### 其它
+
+- 宿主**不支持**直接安装 `.tgz` 文件（实测报 `package.json not found`）。支持的源是：
+  npm spec、git ref、`https://` 仓库地址、本地目录。所以 release 里的 tarball 附件
+  只作存档，不是安装路径；没有 npm 时真正的免发布路径是
+  `omp install git:https://github.com/FanchangWang/opencode2pi@vX.Y.Z`
+- 一次 `npm publish` 同时服务两个宿主：`pi install npm:opencode2pi` 和
+  `omp install npm:opencode2pi` 都从 npm 解析，pi.dev 的包目录也是索引 npm，没有独立 registry
 
 ---
 

@@ -108,7 +108,11 @@ bun test
 打 `vX.Y.Z` tag，`.github/workflows/release.yml` 自动：校验 tag 与版本一致 →
 ci → typecheck → test → 校验 tarball → `npm publish --provenance` → GitHub Release。
 
-一次 publish 同时服务 pi 和 omp（两者都从 npm 解析）。需要 secret `NPM_TOKEN`。
+一次 publish 同时服务 pi 和 omp（两者都从 npm 解析）。
+
+认证二选一：配了 `NPM_TOKEN` secret 就走 token；没有则走 OIDC Trusted Publishing，
+release 始终产出（`if: always()`）。首次发布必须用一次 token，因为 Trusted Publisher 要在
+包的 Settings 页配置。详见 `docs/DEVELOPMENT.md` §6。
 
 ---
 
