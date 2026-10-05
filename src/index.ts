@@ -20,13 +20,20 @@
  *     which receives `(model, context, options)` — a structured context, not a
  *     serialized body. Shape the context, then delegate to the host engine
  *     with `model.api` swapped back to `openai-completions` to avoid recursion.
+ *   - `toolChoice` lives on the *options* object, not on `Context`; setting it
+ *     on the context is a silent no-op.
  */
 
 import { createHash } from 'node:crypto'
 
-import { registerCustomApi, streamSimple } from '@earendil-works/pi-ai'
-import type { AssistantContext, Context, Model } from '@earendil-works/pi-ai'
-import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent'
+import { createAssistantMessageEventStream, registerCustomApi, streamSimple } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
+import type { ExtensionAPI, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
+
+import { discoverFreeModels } from './discovery.ts'
+import { classifyUpstreamFailure, formatFailure } from './errors.ts'
+import { PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
+import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
 
 const PROVIDER = 'opencode-zen-free'
 const API_ID = 'openai-completions-zen-free'
@@ -34,50 +41,12 @@ const ZEN_BASE = 'https://opencode.ai/zen/v1'
 const ANONYMOUS_KEY = 'public'
 const SOURCE_ID = 'opencode2pi'
 
-const CANONICAL_SESSION = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
-const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-
-/** Verified against the anonymous lane with a real streaming chat (2026-10-05). */
-const FREE_MODELS = [
-	{ id: 'big-pickle', name: 'big-pickle (free)', reasoning: true },
-	{ id: 'mimo-v2.5-free', name: 'MiMo v2.5 (free)', reasoning: true },
-	{ id: 'mimo-v2.6-flash-free', name: 'MiMo v2.6 Flash (free)', reasoning: true },
-	{ id: 'ling-3.0-flash-fin-free', name: 'Ling 3.0 Flash Fin (free)', reasoning: false },
-	{ id: 'nemotron-3.5-lightning-free', name: 'Nemotron 3.5 Lightning (free)', reasoning: true },
-] as const
-
-/** Upstream 401/403s these; excluded so the picker only lists working ids. */
-const UNAVAILABLE: Record<string, string> = {
-	'nemotron-3.ultra-free': '401 ModelError: not supported upstream',
-	'muse-spark-1.2-contributor-free': '403 RegionError: blocked in this region',
-}
-
-function base62Fixed(value: bigint, width: number): string {
-	let out = ''
-	let v = value
-	for (let i = 0; i < width; i++) {
-		out = BASE62[Number(v % 62n)] + out
-		v /= 62n
-	}
-	return out
-}
-
-/** OpenCode's canonical session shape, ported from opencode2dsh `ids.ts`. */
-function canonicalSessionID(signal: string): string {
-	if (CANONICAL_SESSION.test(signal)) return signal
-	const sum = createHash('sha256').update(`ses\0${signal}`).digest()
-	return `ses_${sum.subarray(0, 6).toString('hex')}${base62Fixed(BigInt(`0x${sum.subarray(6, 16).toString('hex')}`), 14)}`
-}
-
-const SESSION = canonicalSessionID(`omp:${process.pid}:${new Date().toISOString().slice(0, 10)}`)
+const PROJECT_ID = 'prj_' + createHash('sha256').update('omp:default-project').digest('hex').slice(0, 24)
 
 const DISGUISE_HEADERS: Record<string, string> = {
 	'user-agent': 'opencode/1.18.31 (win32 x64; node24.19.0)',
 	'x-opencode-client': 'cli',
-	'x-opencode-session': SESSION,
-	'x-session-affinity': SESSION,
-	'X-Session-Id': SESSION,
-	'x-opencode-project': 'prj_' + createHash('sha256').update('omp:default-project').digest('hex').slice(0, 24),
+	'x-opencode-project': PROJECT_ID,
 }
 
 /** The upstream gate demands a `bash` and a `read` function in `tools`. */
@@ -89,43 +58,137 @@ const GATE_TOOLS = GATE_TOOL_NAMES.map((name) => ({
 	parameters: { type: 'object' as const, properties: {} },
 }))
 
-function withGateTools(context: Context): Context {
+/**
+ * Ensure the gate tools are present.
+ *
+ * The host ships real `bash` and `read` tools, so in practice this is a no-op
+ * and the stubs never reach the model. It only bites when a caller runs with no
+ * tools at all (a bare completion), where the gate would otherwise fail — so in
+ * that case the stubs arrive with `toolChoice: 'none'` to stop the model from
+ * calling a stub the host cannot service.
+ */
+function withGateTools(
+	context: Context,
+	options: SimpleStreamOptions,
+): { context: Context; options: SimpleStreamOptions } {
 	const existing = context.tools ?? []
 	const names = new Set(existing.map((tool) => tool.name))
 	const missing = GATE_TOOLS.filter((tool) => !names.has(tool.name))
-	if (missing.length === 0) return context
+	if (missing.length === 0) return { context, options }
 
-	// No host tools at all: pin tool_choice so the model never calls a stub
-	// the host has no implementation for.
-	const toolChoice = existing.length === 0 ? ('none' as const) : context.toolChoice
+	if (existing.length > 0) return { context: { ...context, tools: [...existing, ...missing] }, options }
+
 	return {
-		...context,
-		tools: [...existing, ...missing],
-		toolChoice,
+		context: { ...context, tools: [...missing] },
+		options: { ...options, toolChoice: 'none' },
 	}
 }
 
 /**
- * Custom API handler: shapes the context, then hands the request to the
- * host's own openai-completions engine.
+ * Replace a raw provider error with one that names the actual failure mode.
+ *
+ * `errorClassificationMessage` is preserved (and seeded from the original text
+ * when absent) because that is the field the host's recovery logic reads; only
+ * the human-facing `errorMessage` is rewritten. Without that split the
+ * classification would be display-only but would also erase the host's own
+ * retry decisions.
  */
-registerCustomApi(API_ID, (model: Model, context: AssistantContext, options: Context) => {
-	const builtin: Model = { ...model, api: 'openai-completions' as Model['api'] }
-	return streamSimple(builtin, withGateTools(context as Context), options as never)
+function explainFailure(modelId: string, message: AssistantMessage): AssistantMessage {
+	const original = message.errorMessage ?? ''
+	const classification = classifyUpstreamFailure(message.errorStatus, original)
+	return {
+		...message,
+		errorMessage: formatFailure(modelId, classification),
+		errorClassificationMessage: message.errorClassificationMessage ?? original,
+	}
+}
+
+let log: ExtensionAPI['logger'] | undefined
+let warnedMissingSession = false
+
+/**
+ * Custom API handler: shapes the context, pins the conversation's session id,
+ * classifies failures, then delegates the actual streaming to the host engine.
+ */
+registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStreamOptions) => {
+	const incoming = options ?? {}
+	const gated = withGateTools(context, incoming)
+
+	const session = sessionForRequest(options)
+	if (!session.derived && !warnedMissingSession) {
+		warnedMissingSession = true
+		log?.warn(
+			`[${PROVIDER}] host supplied no session identity; using process-level session ${session.id}`,
+		)
+	}
+
+	// The session headers ride on the model we hand the engine rather than on
+	// a wrapped `options.fetch`: `fetch` is optional, and a missing wrapper
+	// would silently drop the session header and fail the upstream gate with a
+	// bare 403. Merging onto the model's own headers also preserves whatever
+	// the host already resolved there.
+	const builtin: Model = {
+		...model,
+		api: 'openai-completions' as Model['api'],
+		headers: { ...model.headers, ...sessionHeaders(session.id) },
+	}
+	const forwarded = gated.options
+
+	const upstream = streamSimple(builtin, gated.context, forwarded)
+
+	// Failures arrive as a stream *event*, not a rejected promise, so
+	// classification means forwarding the stream and rewriting that event.
+	const relayed = createAssistantMessageEventStream()
+	void (async () => {
+		try {
+			for await (const event of upstream) {
+				relayed.push(
+					event.type === 'error'
+						? { ...event, error: explainFailure(model.id, event.error) }
+						: event,
+				)
+			}
+			relayed.end(await upstream.result())
+		} catch (error) {
+			relayed.fail(error)
+		}
+	})()
+	return relayed
 }, SOURCE_ID)
 
 export default function (pi: ExtensionAPI): void {
+	log = pi.logger
+
 	pi.registerProvider(PROVIDER, {
 		baseUrl: ZEN_BASE,
 		api: API_ID,
 		apiKey: ANONYMOUS_KEY,
-		auth: 'apiKey',
 		authHeader: true,
 		headers: DISGUISE_HEADERS,
-		fetchDynamicModels: async () => [...FREE_MODELS],
+		// The seed is what makes cold start work: async discovery cannot
+		// participate in `--model` resolution (docs/FINDINGS.md §7.3).
+		models: [...SEED_MODELS],
+		fetchDynamicModels: async (): Promise<readonly ProviderModelConfig[]> => {
+			const { models, diagnostics } = await discoverFreeModels()
+			for (const line of diagnostics) log?.info(`[${PROVIDER}] ${line}`)
+			return models
+		},
 	})
 
-	pi.logger.info(`[${PROVIDER}] registered · session ${SESSION} · ${FREE_MODELS.length} free models`)
+	pi.logger.info(
+		`[${PROVIDER}] registered · process session ${PROCESS_SESSION} · seed ${SEED_MODELS.length} models · ` +
+			`verified-free ${Object.keys(VERIFIED_FREE).length} · known-rejected ${Object.keys(UNAVAILABLE).length}`,
+	)
 }
 
-export { canonicalSessionID, withGateTools, UNAVAILABLE, PROVIDER, API_ID, SESSION, FREE_MODELS }
+export {
+	explainFailure,
+	withGateTools,
+	PROVIDER,
+	API_ID,
+	SOURCE_ID,
+	PROCESS_SESSION,
+	SEED_MODELS,
+	UNAVAILABLE,
+	VERIFIED_FREE,
+}

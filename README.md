@@ -18,17 +18,30 @@ Working...
 OK
 ```
 
-| 模型 | 状态 |
+### 模型列表与能力参数
+
+列表是**自动发现**的，三级来源（任一失败都自动降级，绝不会把 provider 变成空的）：
+
+| 级 | 来源 | 作用 |
+| --- | --- | --- |
+| S1 | `GET {zen}/v1/models` | 谁现在真的在售 |
+| S2 | [models.dev](https://models.dev) | 免费判定 + 真实能力参数（本地缓存 24h） |
+| S3 | `src/seed.ts` 静态种子 | 完全离线时的兜底 |
+
+实测当前发现 **13 个** 免费模型（原先硬编码 5 个）。付费模型不会进列表。
+
+能力参数（`contextWindow` / `maxTokens` / `cost` / 图片 modality / reasoning effort）来自 models.dev，
+按宿主契约**扁平映射**——嵌套 `limits: {context, output}` 会被宿主静默忽略并回落到 128000/16384，
+这是 `docs/FINDINGS.md` §7.2 记录的坑。任何字段缺失都会**显式落到保守默认值并写进日志**，不会静默。
+
+冷启动 `--model` 用的是静态种子：异步发现来不及参与 `--model` 解析（`docs/FINDINGS.md` §7.3）。
+
+### 其它
+
+| 能力 | 说明 |
 | --- | --- |
-| `big-pickle` | ✅ 可用 |
-| `mimo-v2.5-free` | ✅ 可用 |
-| `mimo-v2.6-flash-free` | ✅ 可用 |
-| `nemotron-3.5-lightning-free` | ✅ 可用 |
-| `ling-3.0-flash-fin-free` | ⚠️ 上游间歇 503（保留，不隐藏） |
-
-工具调用往返实测通过。
-
-**尚未完成**：模型能力参数自动暴露、免费模型列表动态发现、session 亲和、错误分类、`/opencode2pi` 诊断命令 —— 见 [`docs/PLAN.md`](docs/PLAN.md)。
+| session 亲和 | session id 按**会话**派生（取自宿主的 `options.sessionId`，已实测存在），同会话多轮稳定，不同会话互不污染 |
+| 错误分类 | 上游报错会被归类成人能看懂的原因，见下方排障表 |
 
 宿主模型元数据契约已实测确认（含一个会静默失效的坑），见 [`docs/FINDINGS.md` §7](docs/FINDINGS.md)。
 
@@ -76,13 +89,15 @@ stream:true  + 无 tools            →  403
 
 ## 排障
 
-| 现象 | 原因 |
-| --- | --- |
-| `Unknown provider "opencode-zen-free"` | 用了 `--provider`。改用 `--model opencode-zen-free/<id>` |
-| `403 FreeTierError` | 闸门条件被破坏。通常是代码回归 —— 先核对上面三个条件 |
-| `403 This model is not available in your country` | **地区封锁**，不是凭据问题。换一个模型 |
-| `429` | 匿名配额按出口 IP 限流。换网络节点，或设置 `PI_PROXY_OPENCODE2EN_FREE` |
-| `503 Endpoint is unavailable` | 上游该模型临时不可用。换模型重试 |
+| 现象 | 归类 | 原因 / 处理 |
+| --- | --- | --- |
+| `Unknown provider "opencode-zen-free"` | — | 用了 `--provider`。改用 `--model opencode-zen-free/<id>` |
+| `上游形状闸门拒绝（FreeTierError）` | `SHAPE_REJECTED` | 闸门条件被破坏，通常是代码回归 —— 先核对上面三个条件，然后提 issue |
+| `该模型在当前网络地区不可用（RegionError）` | `REGION_BLOCKED` | **地区封锁，不是凭据问题**。换模型或换网络节点 |
+| `模型已下线（ModelError）` | `MODEL_GONE` | 上游已不再支持该模型 |
+| `匿名配额按出口 IP 限流（429）` | `RATE_LIMIT` | 等配额恢复，或设 `PI_PROXY_OPENCODE_ZEN_FREE` 换出口 |
+| `上游拒绝了请求（400）` | `REQUEST_REJECTED` | 模型无法处理这次输入，最常见是给只支持文本的模型发图片 |
+| `上游暂时不可用（5xx）` | `UPSTREAM` | 上游临时故障，换模型重试 |
 
 ---
 

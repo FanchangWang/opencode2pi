@@ -36,6 +36,9 @@
     "smoke": "omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle \"Reply with exactly OK\""
   },
   "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.6.1",
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.4",
     "typescript": "^5.9.0"
   }
 }
