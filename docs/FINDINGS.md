@@ -205,7 +205,7 @@ opencode-zen (112) ...
 
 ---
 
-## 8. 实现期新增的实测结论（2026-10-05，T2–T5）
+## 8. 实现期新增的实测结论（2026-10-05，T2–T6）
 
 ### 8.1 models.dev `opencode` provider 的字段形状
 
@@ -289,3 +289,34 @@ nemotron-3.ultra-free   第二次  HTTP 200
 - npm 上带 `pi-package` keyword 才进 pi 的包目录
 - 宿主包（`@earendil-works/pi-ai`）必须声明为 `peerDependencies` 且**不能打包进去** —— 物理副本会绕过宿主的模块映射，制造重复的 registry 实例
 - 实测 `omp install .` 后**不带 `-e`** 也能加载并正常对话
+
+### 8.7 omp 同时认 `pi` 和 `omp` 两个 manifest key
+
+实测方法：造两个最小包，一个只声明 `pi.extensions`、一个只声明 `omp.extensions`，
+分别 `omp install` 后看扩展里的 `console.error` 是否打印，然后卸载。
+
+| 包内容 | omp 是否加载 |
+| --- | --- |
+| 只有 `pi.extensions`（无 `omp` key） | ✅ 加载 |
+| 只有 `omp.extensions`（无 `pi` key） | ✅ 加载 |
+
+即 **`omp` key 是 omp 的原生声明，`pi` key 是它对上游 pi 的兼容**，不是「omp 靠兼容 pi 格式」。
+因此 `package.json` 里两个 key 都要写：pi 只认 `pi`（未实测，但 `omp` 是分叉扩展，
+pi 不可能认识它），omp 则走各自最优路径。
+
+**一个 npm 包即可同时服务 pi 和 omp，不需要发两个包。**
+
+### 8.8 宿主支持的安装源（实测）
+
+`omp install --dry-run` 逐个验证：
+
+| 源 | 结果 |
+| --- | --- |
+| `npm:opencode2pi` | ✅ |
+| `git:https://github.com/<owner>/<repo>` | ✅ |
+| `https://github.com/<owner>/<repo>` | ✅ |
+| 本地目录 `./my-ext` | ✅ |
+| **`.tgz` 压缩包** | ❌ `Failed to link: package.json not found at ...tgz` |
+
+推论：**GitHub Release 的 tarball 附件不能作为安装路径**，只是存档。
+没有 npm 时真正的免发布路径是 git ref（`git:<url>@<tag>`）。
