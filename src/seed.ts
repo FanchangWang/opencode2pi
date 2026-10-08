@@ -20,22 +20,13 @@
 
 import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
-/** Ids verified end-to-end against the anonymous lane on 2026-10-05. */
+/** Ids verified end-to-end against the anonymous lane. */
 export const SEED_MODELS: readonly ProviderModelConfig[] = [
 	{
 		id: 'big-pickle',
 		name: 'big-pickle (free)',
 		reasoning: true,
 		input: ['text'],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 32_000,
-	},
-	{
-		id: 'mimo-v2.5-free',
-		name: 'MiMo v2.5 (free)',
-		reasoning: true,
-		input: ['text', 'image'],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 32_000,
@@ -59,6 +50,15 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
 		maxTokens: 32_768,
 	},
 	{
+		id: 'ling-3.1-flash-free',
+		name: 'Ling 3.1 Flash (free)',
+		reasoning: true,
+		input: ['text'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
 		id: 'nemotron-3.5-lightning-free',
 		name: 'Nemotron 3.5 Lightning (free)',
 		reasoning: true,
@@ -66,6 +66,34 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 262_144,
 		maxTokens: 262_144,
+	},
+	{
+		// models.dev also declares `video`; the host models text+image only.
+		id: 'space-bunny-free',
+		name: 'Space Bunny (free)',
+		reasoning: true,
+		input: ['text', 'image'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 524_288,
+	},
+	{
+		id: 'fledge-alpha-free',
+		name: 'Fledge Alpha (free)',
+		reasoning: true,
+		input: ['text', 'image'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: 'longcat-2.5-preview-free',
+		name: 'LongCat 2.5 Preview (free)',
+		reasoning: true,
+		input: ['text', 'image'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
 	},
 ]
 
@@ -76,19 +104,28 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
  */
 export const VERIFIED_FREE: Readonly<Record<string, true>> = {
 	'big-pickle': true,
-	'mimo-v2.5-free': true,
 	'mimo-v2.6-flash-free': true,
 	'ling-3.0-flash-fin-free': true,
+	'ling-3.1-flash-free': true,
 	'nemotron-3.5-lightning-free': true,
+	'space-bunny-free': true,
+	'fledge-alpha-free': true,
+	'longcat-2.5-preview-free': true,
 }
 
 /**
- * Ids upstream rejects on the anonymous lane. Measured 2026-10-05:
- * `nemotron-3.5-lightning-free` works while these two do not, and both are
- * priced at zero in models.dev — so pricing metadata alone would happily
- * re-advertise them. Reasons are verbatim upstream responses.
+ * Ids upstream refuses on the anonymous lane. Each reason is the verbatim
+ * upstream response from a gate-shaped probe.
+ *
+ * `mimo-v2.5-free` is the case that proves this list earns its keep: retired
+ * from the live lane (gone from `/models`, `401 ModelError`) while models.dev
+ * still publishes it at zero cost — metadata alone would keep re-advertising
+ * a dead id.
  */
 export const UNAVAILABLE: Readonly<Record<string, string>> = {
-	'nemotron-3.ultra-free': '401 ModelError: not supported upstream',
+	'mimo-v2.5-free': '401 ModelError: not supported upstream (retired, measured 2026-10-08)',
+	// Zen spells this with hyphens; the dotted spelling never matched a live id.
+	'nemotron-3-ultra-free': '401 ModelError: not supported upstream',
 	'muse-spark-1.2-contributor-free': '403 RegionError: blocked in this region',
+	'muse-spark-1.3-contributor-free': '403 RegionError: blocked in this region',
 }

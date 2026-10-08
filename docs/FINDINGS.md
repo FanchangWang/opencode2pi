@@ -44,6 +44,30 @@ stream:true  + 无 tools            →  403 FreeTierError
 
 注意最后两行：**`RegionError`（地区封锁）和 `FreeTierError`（形状闸门）是两回事**，错误分类必须分开，否则会把地区问题误报成凭据问题。
 
+### 2.1 名单复测（2026-10-08，闸门形状同上）
+
+`GET /zen/v1/models` 匿名返回 87 个 id，其中名字带 `free` 或定价为零的 13 个。
+逐个闸门形状实测：
+
+| 模型 | 结果 |
+| --- | --- |
+| `big-pickle` / `mimo-v2.6-flash-free` / `nemotron-3.5-lightning-free` | ✅ 200 |
+| `space-bunny-free` / `fledge-alpha-free` / `longcat-2.5-preview-free` / `ling-3.1-flash-free` | ✅ 200 |
+| `mimo-v2.5-free` | 401 `ModelError: not supported`，且已从 `/models` 消失 → **已下线** |
+| `ling-3.0-flash-fin-free` / `exo-free` | 400 / 503 `Endpoint is unavailable`（上游 Console 抖动，保留） |
+| `jev-1.13-free` | 500 Internal server error（保留） |
+| `nemotron-3.ultra-free` | 401 `ModelError` |
+| `muse-spark-1.2/1.3-contributor-free` | 403 `RegionError`（本地区封锁） |
+
+教训：**models.dev 的零定价元数据会滞后于下线**。`mimo-v2.5-free` 下线后
+models.dev 仍以 0 价发布，纯靠元数据判定会继续把死模型端上选择器 ——
+`UNAVAILABLE` denylist 是唯一挡住它的机制，所以下线必须手工登记。
+
+denylist 的 id 拼写必须逐字来自 `/models`：`nemotron-3.ultra-free`（点）
+曾长期挂在 `UNAVAILABLE` 里，而线上真实 id 是 `nemotron-3-ultra-free`（连字符），
+于是这条 denylist 一直是静默空转，401 的死模型照旧出现在选择器上。
+真实 id 本身也带点（`mimo-v2.6-flash-free`），所以拼写只能靠实测，不能靠肉眼推断。
+
 ## 3. omp 扩展 API 的实测行为
 
 ### 3.1 `pi.registerProvider` 的 `onPayload` / `prepareRequest` 是哑字段

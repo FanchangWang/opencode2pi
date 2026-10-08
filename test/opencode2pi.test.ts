@@ -14,7 +14,7 @@ import { healthFor, mergeHealth, pruneHealth, summarizeHealth, type HealthStore,
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
-import { SEED_MODELS, VERIFIED_FREE } from '../src/seed.ts'
+import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
 
 const CANONICAL = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 
@@ -94,9 +94,18 @@ describe('free-lane judgment order (T2)', () => {
 		expect(isFreeModel('ghost-free', retired, VERIFIED_FREE)).toBe(false)
 	})
 
-	test('a verified-rejected id never ships despite being free', () => {
-		expect(isFreeModel('nemotron-3.ultra-free', free, VERIFIED_FREE)).toBe(false)
-		expect(isFreeModel('muse-spark-1.2-contributor-free', free, VERIFIED_FREE)).toBe(false)
+	test('every denylisted id never ships despite being free', () => {
+		expect(Object.keys(UNAVAILABLE).length).toBeGreaterThan(0)
+		for (const id of Object.keys(UNAVAILABLE)) {
+			expect(isFreeModel(id, free, VERIFIED_FREE)).toBe(false)
+		}
+	})
+
+	test('a retired id that models.dev still prices at zero stays denylisted', () => {
+		// mimo-v2.5-free was pulled from Zen while models.dev kept publishing it
+		// at cost 0, so free-by-pricealone would re-advertise a dead model.
+		expect(isFreeModel('mimo-v2.5-free', free, VERIFIED_FREE)).toBe(false)
+		expect(SEED_MODELS.map((model) => model.id)).not.toContain('mimo-v2.5-free')
 	})
 
 	test('a verified id passes although its name carries no signal', () => {

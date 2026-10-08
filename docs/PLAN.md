@@ -29,9 +29,12 @@ Working...
 OK
 ```
 
-5 个硬编码模型 id（`big-pickle` / `mimo-v2.5-free` / `mimo-v2.6-flash-free` /
-`ling-3.0-flash-fin-free` / `nemotron-3.5-lightning-free`），其中
-`ling-3.0-flash-fin-free` 上游间歇 503 —— **按用户决定保留、不隐藏**。
+8 个硬编码模型 id（`big-pickle` / `mimo-v2.6-flash-free` /
+`ling-3.0-flash-fin-free` / `ling-3.1-flash-free` /
+`nemotron-3.5-lightning-free` / `space-bunny-free` / `fledge-alpha-free` /
+`longcat-2.5-preview-free`），其中 `ling-3.0-flash-fin-free` 上游间歇 400/503 ——
+**按用户决定保留、不隐藏**。`mimo-v2.5-free` 已于 2026-10-08 实测下线，
+移入 `UNAVAILABLE`。名单每次同步都以 `/models` 实测为准，见 `FINDINGS.md` §2.1。
 
 安装真实宿主类型包后 `tsc` 暴露了三个当时就存在的缺陷，已在 T1 一并修掉：
 
@@ -62,7 +65,7 @@ OK
 **规则**：
 - 字段缺失或非法时**必须显式落到保守默认值并记录原因**，不要让宿主静默兜底 —— 静默兜底是 `FINDINGS.md` §7.2 那个坑。
 - `maxTokens` 不能超过 `contextWindow`（宿主会 clamp，但自己夹一次更可控）。
-- 元数据整体不可用时，退回 `src/index.ts` 里已验证的静态种子（那 5 个 id 的参数是实测过的）。
+- 元数据整体不可用时，退回 `src/seed.ts` 里已验证的静态种子（每个 id 的参数都是实测过的）。
 
 **验收**：
 1. 临时断网，仍能用且参数是静态种子的值，不是 128000/16384。

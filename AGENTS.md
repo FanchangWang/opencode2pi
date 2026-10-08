@@ -74,7 +74,7 @@ src/
   commands.ts   /opencode2pi 斜杠命令与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts   41 项不变量测试
+  opencode2pi.test.ts   42 项不变量测试
 ```
 
 `gate.ts` 单独存在是因为：doctor 和健康探测各写一份形状的话，两者一旦漂移，
