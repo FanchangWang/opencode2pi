@@ -13,13 +13,13 @@
 ## 安装
 
 ```sh
-# 推荐：npm（pi 与 omp 都从这个源装；npm 还没上线时用下面的 git）
-omp install npm:opencode2pi
-pi  install npm:opencode2pi
-
-# 不走 npm：从 git 装。注意：omp/pi 不支持 .tgz，只能用 git URL
+# 当前可用：从 git 装。注意：omp/pi 不支持 .tgz，只能用 git URL
 omp install git:https://github.com/FanchangWang/opencode2pi@stable
 pi  install git:https://github.com/FanchangWang/opencode2pi@stable
+
+# npm 尚未上线（仓库没有 NPM_TOKEN，OIDC 首发也未配置），下面的命令暂时不可用：
+# omp install npm:opencode2pi
+# pi  install npm:opencode2pi
 
 # 追踪最新代码：装的是"此刻 main 指向的 commit"，含未发布的改动，之后不会自动更新
 omp install git:https://github.com/FanchangWang/opencode2pi@main

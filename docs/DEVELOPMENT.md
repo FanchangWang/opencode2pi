@@ -203,6 +203,21 @@ OIDC 路径下 npm CLI 会自动检测 CI 环境并改用短期凭据；**proven
 所以那条路径不加 `--provenance`。选 OIDC 前会先检查 `npm >= 11.5.1`，不够就明确报错，
 而不是让发布挂在后面报一个看不懂的 ENEEDAUTH。
 
+### 现状：npm 尚未发布，`Publish to npm` 步骤注定失败
+
+v0.1.1 / v0.2.0 / v0.2.1 三次发版的 `Publish to npm` 全部挂在 `ENEEDAUTH`：
+仓库没有 `NPM_TOKEN` secret，而 `opencode2pi` 在 npmjs.com 上还不存在
+（`npm view opencode2pi` → 404），没有包可以配置 Trusted Publisher。
+
+所以 **GitHub Release + `stable` ref 前移才是当前唯一有效的发版产物**，
+README 的安装命令只给 git URL。要真正上 npm，必须先补一次 token 首发
+（`gh secret set NPM_TOKEN` → 删 tag 重推；版本号不可重用），
+此后 CI 才能走 OIDC。
+
+因为 workflow 里 publish 之后的步骤都带 `if: always()`，这个失败不会挡住
+Release 和 `stable`—— 但也意味着**没人盯着就会一直失败而无人察觉**，
+排查发版问题时先看 `Publish to npm` 这一步的结论。
+
 **Release 步骤始终执行**（`if: always()`），且 notes 会写明这次有没有发上 npm、
 走的是哪条认证路径。
 
