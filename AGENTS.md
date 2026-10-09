@@ -56,13 +56,31 @@
 8. **地区封锁 ≠ 凭据问题。** `RegionError` 和 `FreeTierError` 都是 403/401，
    判定顺序错了会把地区问题误报成 API key 无效。
 
+9. **隐藏模型必须由用户选择。** `filters.json` 里只有两个开关，都默认为关；
+   配额耗尽与 transport 超时（都是 🚧 `limited`）**永远不隐藏任何模型** ——
+   那是通道的状态。规则集中在 `src/filters.ts` 的 `HIDDEN_VERDICTS`，别在别处再写一遍。
+
+10. **`status` 读 store，不重探；只有它从没有记录过的模型是当场补测。** 结论超过
+    6 小时（`HEALTH_TTL_MS`）只在行尾标 `（已过期）` 并提醒跑 `probe` —— 全量探测要花
+    真实推理配额，该由用户发起。`status` 与 `probe` 的差别只在事后动作：只有 `probe`
+    询问过滤。
+11. **不要注册 `fetchDynamicModels`。** 会话内重新注册**不会**重跑发现，而动态结果
+    被宿主缓存 24h、指纹只对它自己的空静态列表取，命中时根本不调用我们的 fetcher ——
+    在 fetcher 里过滤等于没过滤（`FINDINGS.md` §8.9）。发现由 `src/index.ts` 自己跑，
+    模型列表以静态 `models` 整体发布。
+
+12. **重新注册同名 provider 会整体替换该 provider 的全部模型**（宿主契约，
+    `src/config/model-registry.ts`，实测）。这是过滤结论能进 `/model` 与 `--model`
+    的唯一机制，`src/index.ts` 的 `applyProvider` 是唯一写入点；隐藏集变化由
+    `filters.ts` 的 `onHiddenChange` 通知，别在别处再注册一次。
+
 ---
 
 ## 项目地图
 
 ```
 src/
-  index.ts      provider 注册 · 闸门形状补全 · 错误流转发 · 命令注册
+  index.ts      provider 注册（可重写）· 闸门形状补全 · 错误流转发 · 命令注册
   seed.ts       静态种子（冷启动必需）+ 已知实测失效的 id
   metadata.ts   models.dev → 宿主扁平模型契约；免费判定顺序
   discovery.ts  三级发现阶梯（S1 实时列表 / S2 元数据 / S3 种子），15s 预算
@@ -71,10 +89,11 @@ src/
   gate.ts       共享的闸门形状请求（doctor 与健康探测必须用同一份）
   doctor.ts     闸门自检
   health.ts     逐模型探测 · 判定规则 · 落盘缓存
-  commands.ts   /opencode2pi 斜杠命令与 TUI
+  filters.ts    用户选择的隐藏规则 + 派生隐藏集（默认一个都不隐藏）
+  commands.ts   /opencode2pi 四条命令（doctor/status/probe/filter）与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts   42 项不变量测试
+  opencode2pi.test.ts   48 项不变量测试
 ```
 
 `gate.ts` 单独存在是因为：doctor 和健康探测各写一份形状的话，两者一旦漂移，
@@ -99,7 +118,8 @@ bun test
 
 期望：输出恰好 `OK` / `3` / 干净退出 / 单测全过。
 
-`/opencode2pi doctor` 和 `/opencode2pi probe` 需要交互式 TUI，打印模式下不可用。
+`/opencode2pi doctor`、`probe` 与 `filter` 需要交互式 TUI；打印模式下 `status`
+照常打印已有结论并点名哪些模型没探测过，`probe` 直接提示不可用。
 
 ---
 
@@ -124,7 +144,7 @@ release 始终产出（`if: always()`）。首次发布必须用一次 token，�
 - ❌ 只给 `fetchDynamicModels` 不给静态种子
 - ❌ spawn 子进程 / 移植 IP 池（宿主代理是**进程内缓存**，运行时改环境变量不生效）
 - ❌ 照抄 opencode2dsh 的重试策略（匿名通道重试轰炸会挤掉自己的配额）
-- ❌ 用健康状态过滤模型列表（只标注，不隐藏 —— 用户明确要求）
+- ❌ **自动**用健康状态过滤模型列表（默认只标注；隐藏与否是用户的决定，由 `filter` 询问后落盘）
 
 ---
 

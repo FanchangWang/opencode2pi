@@ -48,7 +48,13 @@ function delay(ms: number): Promise<void> {
 	setTimeout(resolve, ms)
 	return promise
 }
-/** How long a stored verdict is shown before it is refreshed. */
+/**
+ * How long a verdict may be shown before `status` stops treating it as current.
+ *
+ * Six hours, not a day: the free pool churns on the order of hours, and a stale
+ * verdict is flagged (`（已过期）`) rather than re-run — a full sweep costs real
+ * inference, so it is the user's call, which is what `probe` is for.
+ */
 export const HEALTH_TTL_MS = 6 * 60 * 60 * 1000
 
 export type ModelHealth = 'ok' | 'flaky' | 'dead' | 'unknown' | 'limited'
@@ -105,14 +111,29 @@ export function healthFor(kind: UpstreamFailure | 'OK'): ModelHealth {
 			return 'ok'
 		case 'MODEL_GONE':
 			return 'flaky'
+		// A geo block is deterministic for a given egress: the same request from
+		// the same network keeps saying no.
 		case 'REGION_BLOCKED':
 			return 'dead'
 		case 'RATE_LIMIT':
 			return 'limited'
-		case 'UPSTREAM':
-			return 'flaky'
-		default:
-			return 'unknown'
+		// A request the upstream rejected is the model refusing this particular
+		// round, which is evidence about the request, not a state of the model:
+		// measured on `ling-3.0-flash-fin-free` it answers 400 for one input
+		// and works for the next. An unrecognised failure carries no more
+		// evidence than a 5xx does — the classifier simply did not recognise the
+		// text — so giving it a verdict of its own would invent a fifth state
+		// that only ever showed up in `status`.
+	case 'REQUEST_REJECTED':
+	case 'UNKNOWN':
+	case 'UPSTREAM':
+		return 'flaky'
+		// The shape gate and the credential are lane-wide, so blaming a model
+		// for them would paint ❓ across the whole roster at the exact moment
+		// the gate breaks. They surface through `doctor` instead.
+	case 'SHAPE_REJECTED':
+	case 'AUTH':
+		return 'unknown'
 	}
 }
 
@@ -262,8 +283,15 @@ export function pruneHealth(store: HealthStore, keep: ReadonlySet<string>): Heal
 	return pruned
 }
 
-export async function saveHealth(results: readonly ProbeResult[]): Promise<HealthStore> {
-	const merged = pruneHealth(mergeHealth(await loadHealth(), results), new Set(results.map((result) => result.modelId)))
+/**
+ * Merge fresh probe results into the store and write it back.
+ *
+ * `keep` is the roster the caller just looked at, not the ids this batch
+ * covered: `status` probes only the models it has no record of, and pruning to
+ * the batch would throw away every verdict it just refused to re-run.
+ */
+export async function saveHealth(results: readonly ProbeResult[], keep: ReadonlySet<string>): Promise<HealthStore> {
+	const merged = pruneHealth(mergeHealth(await loadHealth(), results), keep)
 
 	try {
 		await mkdir(join(tmpdir(), 'opencode2pi'), { recursive: true })
@@ -284,13 +312,19 @@ const VERDICT_ORDER: readonly ModelHealth[] = ['ok', 'flaky', 'limited', 'unknow
 /**
  * Summarize the roster's verdicts as they are *displayed*.
  *
- * The store, never the raw probe results, is the source of truth here: a
- * second consecutive `ModelError` promotes ⚠️ to ❌ in {@link mergeHealth} only,
- * so counting raw results makes the summary contradict the lines right below it.
+ * The store, never the raw probe results, is the source of truth here: a second
+ * consecutive `ModelError` promotes ⚠️ to ❌ in {@link mergeHealth} only, so
+ * counting raw results makes the summary contradict the lines right below it. A
+ * model with no record is not a verdict and is not counted as one — its roster
+ * line says `未探测`, which is a statement about our coverage, not about the
+ * model.
  */
 export function summarizeHealth(roster: readonly { readonly id: string }[], store: HealthStore): string {
 	const counts: Record<ModelHealth, number> = { ok: 0, flaky: 0, dead: 0, unknown: 0, limited: 0 }
-	for (const model of roster) counts[store[model.id]?.health ?? 'unknown']++
+	for (const model of roster) {
+		const health = store[model.id]?.health
+		if (health) counts[health]++
+	}
 	return VERDICT_ORDER.filter((health) => counts[health] > 0)
 		.map((health) => `${HEALTH_MARK[health]} ${counts[health]}`)
 		.join('  ')

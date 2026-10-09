@@ -74,7 +74,7 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/index.ts` | provider 注册、闸门形状补全、错误流转发、命令注册 |
+| `src/index.ts` | provider 注册（可重写）、闸门形状补全、错误流转发、命令注册 |
 | `src/seed.ts` | 静态种子（冷启动必需）+ 已知失效 id |
 | `src/metadata.ts` | models.dev → 宿主扁平模型契约；免费判定 |
 | `src/discovery.ts` | 三级发现阶梯、并发、15s 预算、落盘缓存 |
@@ -83,7 +83,8 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 | `src/gate.ts` | **共享**的闸门形状请求（doctor 与健康探测共用同一份） |
 | `src/doctor.ts` | 闸门自检 |
 | `src/health.ts` | 逐模型探测、判定规则、落盘缓存 |
-| `src/commands.ts` | `/opencode2pi` 斜杠命令与 TUI |
+| `src/filters.ts` | 用户选择的隐藏规则、落盘与派生隐藏集 |
+| `src/commands.ts` | `/opencode2pi` 四条命令（doctor/status/probe/filter）与 TUI |
 
 > `gate.ts` 单独存在是有原因的：如果 doctor 和健康探测各写一份形状，两者一旦漂移，
 > doctor 会报「闸门正常」而真实路径已经失效 —— 那正是这段代码唯一要抓的故障。
@@ -141,9 +142,40 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 所以 `PROBE_CONCURRENCY` 是 2，每发一个请求后停 500ms。这**缓解**自伤，
 治不了 429 —— 429 本来就是按模型计的。
 
-### 4.5 健康状态只标注，不隐藏
+### 4.5 默认只标注；隐藏与否由用户决定
 
-任何情况下都不用健康状态去过滤模型列表。
+健康状态**从不自动**过滤模型列表。要不要把探测失败的模型从 `/model` 与 `--model`
+里拿掉，是用户的决定，由 `/opencode2pi filter` 询问后落进 `filters.json`
+（两个开关，默认都关）。
+
+隐藏集由 `filters.ts` 一处派生，规则按**展示出来的判定**而不是失败类型来写：
+只有 ❌ 与 ⚠️ 可隐藏，🚧（429 与 transport 超时）与 ❓（闸门/凭据）永远不隐藏 ——
+那些是通道的状态，按它们隐藏会在通道最该被看见的时候把 roster 清空。
+
+隐藏集变化时 `filters.ts` 通知 `index.ts` 的 `applyProvider` 重写一次注册：重复注册
+同名 provider 会**整体替换**该 provider 的全部模型（宿主契约
+`src/config/model-registry.ts`），这是结论能进 `/model` 的唯一机制。
+
+模型列表**只由这一处以静态 `models` 发布**，不注册 `fetchDynamicModels`：会话内重新
+注册不会重跑发现，而宿主把动态结果缓存 24h、指纹只对它自己的空静态列表取，缓存
+命中时根本不调用我们的 fetcher —— 在 fetcher 里过滤等于没过滤。完整实测见
+`FINDINGS.md` §8.9。启动顺序因此是「先注册种子 → `await` 发现 → 重新注册」，
+宿主的扩展加载会 await 工厂函数、之后才排空注册队列，所以这一次 await 让
+`--model provider/id` 仍然能解析到种子以外的 id。
+
+### 4.6 `status` 读 store，`probe` 才全量重探
+
+`status` 回答的是「上次探测说了什么」，答案就在 `<dataDir>/health.json` 里，
+每次全探一遍等于拿真实推理配额重画一张用户已经有的图。两个例外是**缺口**而不是图：
+
+- 从没有记录过的模型（含上次探测之后新发现的）当场补测 —— 对能问的东西显示
+  「未探测」比问一句更糟。
+- 超过 `HEALTH_TTL_MS`（6 小时）的结论**标注不重探**（行尾 `（已过期）` 并提示
+  跑 `probe`）。它是一个真实结果，只是不再代表当前状态。
+
+`status` 与 `probe` 的差别只在事后动作：只有 `probe` 询问过滤。补测只覆盖缺口，
+所以 `saveHealth` 按**调用方看到的整个 roster** 剪枝，不是按这批结果 ——
+否则会把它刚刚拒绝重跑的那些结论删掉。
 
 ---
 
@@ -167,7 +199,8 @@ bun test
 
 **如果对话返回 403，先查本文 §1 的三个条件**，不要改别的地方。
 
-`/opencode2pi doctor` 和 `/opencode2pi probe` 需要交互式 TUI，打印模式下不可用。
+`/opencode2pi doctor`、`probe` 与 `filter` 需要交互式 TUI；打印模式下 `status`
+照常打印已有结论并点名哪些模型没探测过，`probe` 直接提示不可用。
 
 ---
 

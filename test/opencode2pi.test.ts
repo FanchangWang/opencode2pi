@@ -10,8 +10,17 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { healthFor, mergeHealth, pruneHealth, summarizeHealth, type HealthStore, type ProbeResult } from '../src/health.ts'
+import { healthFor, mergeHealth, pruneHealth, summarizeHealth, type HealthRecord, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
+import {
+	DEFAULT_FILTERS,
+	hidden,
+	hiddenFromStore,
+	onHiddenChange,
+	publishFilters,
+	publishHealth,
+	type ProbeFilters,
+} from '../src/filters.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
 import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
@@ -288,8 +297,16 @@ describe('health verdicts (T5)', () => {
 	})
 
 	test('intermittent models keep a non-fatal mark', () => {
-		// ling-3.0-flash-fin-free answers 400 on this lane; it must never be ❌.
-		expect(mergeHealth({}, [probe('ling-3.0-flash-fin-free', 'REQUEST_REJECTED', 'unknown')])['ling-3.0-flash-fin-free']?.health).toBe('unknown')
+		// ling-3.0-flash-fin-free answers 400 on this lane; it must never be ❌,
+		// and a 400 is evidence about the round rather than a state of its own.
+		expect(healthFor('REQUEST_REJECTED')).toBe('flaky')
+		expect(mergeHealth({}, [probe('ling-3.0-flash-fin-free', 'REQUEST_REJECTED', 'flaky')])['ling-3.0-flash-fin-free']?.health).toBe('flaky')
+	})
+
+	test('an unrecognised failure is a transient, not a verdict of its own', () => {
+		// The classifier simply did not recognise the text; that carries no more
+		// evidence against a model than a 5xx does.
+		expect(healthFor('UNKNOWN')).toBe('flaky')
 	})
 
 	test('the summary counts the displayed verdict, not the raw probe result', () => {
@@ -302,9 +319,11 @@ describe('health verdicts (T5)', () => {
 		expect(summarizeHealth([{ id: 'm' }, { id: 'fine' }], store)).toBe('✅ 1  ❌ 1')
 	})
 
-	test('every roster model is counted exactly once', () => {
+	test('a model the store says nothing about is not counted as a verdict', () => {
+		// `status` prints 未探测 for it and probes it on the spot, so it is a
+		// statement about our coverage rather than a state of the model.
 		const store = mergeHealth({}, [probe('a', 'OK', 'ok')])
-		expect(summarizeHealth([{ id: 'a' }, { id: 'unprobed' }], store)).toBe('✅ 1  ❓ 1')
+		expect(summarizeHealth([{ id: 'a' }, { id: 'unprobed' }], store)).toBe('✅ 1')
 	})
 
 	test('the store keeps only the models the current roster contains', () => {
@@ -343,5 +362,82 @@ describe('health verdicts (T5)', () => {
 		const dead = mergeHealth({}, [probe('m', 'MODEL_GONE', 'flaky'), probe('m', 'MODEL_GONE', 'flaky')])
 		const paused = mergeHealth(dead, [probe('m', 'RATE_LIMIT', 'limited')])
 		expect(paused['m']?.health).toBe('dead')
+	})
+})
+
+
+describe('roster filters', () => {
+	const record = (kind: HealthRecord['kind'], health: HealthRecord['health']): HealthRecord => ({
+		kind,
+		health,
+		detail: '',
+		checkedAt: 1_000,
+		terminalFailures: 0,
+		transientFailures: 0,
+	})
+
+	// One model per verdict the roster can display, so a rule that hides by
+	// anything other than "attributable to this model" has nowhere to hide.
+	const store: HealthStore = {
+		'fine': record('OK', 'ok'),
+		'out-of-quota': record('RATE_LIMIT', 'limited'),
+		'lane-timeout': record('UPSTREAM', 'limited'),
+		'retired': record('MODEL_GONE', 'dead'),
+		'geo-blocked': record('REGION_BLOCKED', 'dead'),
+		'refuses-images': record('REQUEST_REJECTED', 'flaky'),
+		'outage': record('UPSTREAM', 'flaky'),
+		'gate-is-broken': record('SHAPE_REJECTED', 'unknown'),
+	}
+
+	const withFilters = (patch: Partial<ProbeFilters>): ProbeFilters => ({ ...DEFAULT_FILTERS, ...patch })
+
+	test('nothing is hidden until the user says so', () => {
+		expect([...hiddenFromStore(store, DEFAULT_FILTERS)]).toEqual([])
+	})
+
+	test('a quota pause and a dead lane never empty the roster', () => {
+		// Both are facts about the channel: hiding on them empties the list at
+		// exactly the moment it is worth having.
+		const hidden = hiddenFromStore(store, withFilters({ hideRegionBlocked: true, hideFailed: true }))
+		expect([...hidden].sort()).toEqual(['geo-blocked', 'outage', 'refuses-images', 'retired'])
+		expect(hidden.has('out-of-quota')).toBe(false)
+		expect(hidden.has('lane-timeout')).toBe(false)
+	})
+
+	test('the narrow switch hides exactly the geo blocks', () => {
+		// A model retired upstream is still worth seeing: the free pool rotates
+		// and an id that comes back should already be in the list.
+		expect([...hiddenFromStore(store, withFilters({ hideRegionBlocked: true }))]).toEqual(['geo-blocked'])
+	})
+
+	test('the hidden set follows both the choice and the latest verdicts', () => {
+		publishFilters(DEFAULT_FILTERS)
+		publishHealth(store)
+		expect(hidden().size).toBe(0)
+
+		publishFilters(withFilters({ hideRegionBlocked: true }))
+		expect([...hidden()]).toEqual(['geo-blocked'])
+
+		// A re-probe that clears the geo block puts the model back, with no new
+		// question asked.
+		publishHealth({ 'geo-blocked': record('OK', 'ok') })
+		expect(hidden().size).toBe(0)
+	})
+
+	test('the provider is rewritten only when the roster actually moves', () => {
+		publishFilters(DEFAULT_FILTERS)
+		publishHealth(store)
+		let rewrites = 0
+		const off = onHiddenChange(() => {
+			rewrites++
+		})
+
+		publishFilters(withFilters({ hideRegionBlocked: true }))
+		publishHealth(store)
+		expect(rewrites).toBe(1)
+
+		off()
+		publishFilters(DEFAULT_FILTERS)
+		expect(rewrites).toBe(1)
 	})
 })

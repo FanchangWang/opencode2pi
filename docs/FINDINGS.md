@@ -344,3 +344,30 @@ pi 不可能认识它），omp 则走各自最优路径。
 
 推论：**GitHub Release 的 tarball 附件不能作为安装路径**，只是存档。
 没有 npm 时真正的免发布路径是 git ref（`git:<url>@<tag>`）。
+
+### 8.9 `fetchDynamicModels` 不能用来做过滤：缓存 24h，且会话内不重跑（2026-10-09 实测）
+
+现象：TUI 里跑完 `/opencode2pi filter`，`/model` 里被隐藏的模型**一个没少**，
+连不在种子里的新发现模型也还在。
+
+两条独立的宿主行为叠加导致（源码 `src/config/model-registry.ts` +
+`@oh-my-pi/pi-catalog` 的 `model-manager.ts`）：
+
+1. **重新注册不会重跑发现。** `registerProvider` 只重建该 provider 的静态 overlay
+   切片；`fetchDynamicModels` 那一段只把 fetcher 存进 `#runtimeModelManagers`，
+   源码注释写得很直白：*“Discovery is driven by refreshRuntimeProviders() after the
+   drain — not here.”* 会话启动时已经合并进来的动态行就留在注册表里。
+2. **动态缓存的指纹与我们的静态列表无关。** 建 manager 时传的是 `staticModels: []`，
+   而 `cacheFingerprint()` 在 `dynamicModelsAuthoritative` 下只对这份空静态列表取
+   指纹。缓存 TTL 是 24h，命中时**根本不调用 fetcher**。所以「在 fetcher 里过滤」
+   只在第一次、缓存还冷的时候有效。
+
+推论：**不要注册 `fetchDynamicModels`**（`opencode2pi-cli` 早就这么做了）。发现由
+扩展自己跑，模型列表由扩展自己以静态 `models` 整体发布 —— 重新注册同名 provider 会
+整体替换它的模型切片（实测：`[a,b,c]` → 重新注册 `[a]` 后 `getProviderModels`
+只剩 `[a]`，`find('b')` 为 undefined），这是唯一可靠的收敛点。
+
+代价与对策：静态 `models` 必须在注册时就有值（§7.3），所以流程是「先注册种子 →
+再 `await` 发现 → 重新注册」。宿主的扩展加载会 `await` 工厂函数、之后才排空注册
+队列（`extensibility/extensions/loader.ts`），所以这一次 `await` 换来的是
+`--model provider/id` 能解析到种子以外的 id；实测发现耗时 0.3–0.7s。

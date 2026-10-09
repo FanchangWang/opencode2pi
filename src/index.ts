@@ -33,6 +33,8 @@ import type { ExtensionAPI, ProviderModelConfig } from '@oh-my-pi/pi-coding-agen
 import { discoverFreeModels } from './discovery.ts'
 import { handleCommand } from './commands.ts'
 import { classifyUpstreamFailure, formatFailure } from './errors.ts'
+import { hidden, loadFilters, onHiddenChange, publishFilters, publishHealth } from './filters.ts'
+import { loadHealth } from './health.ts'
 import { PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
 
@@ -157,8 +159,37 @@ registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStrea
 	return relayed
 }, SOURCE_ID)
 
-export default function (pi: ExtensionAPI): void {
-	log = pi.logger
+/**
+ * The catalog we publish. Starts as the seed — the only thing that can exist
+ * before discovery — and is replaced by the discovered list once it lands.
+ */
+let catalog: readonly ProviderModelConfig[] = SEED_MODELS
+
+/**
+ * Write the provider registry from the catalog minus what the user hid.
+ *
+ * This is the *only* place the model list is written, and it writes the whole
+ * list every time: re-registering a provider name replaces its entire model
+ * slice (host contract, `src/config/model-registry.ts`), which is what makes a
+ * filter choice reach `/model` and `--model`.
+ *
+ * Discovery is ours to run, not the host's. Registering `fetchDynamicModels`
+ * looked equivalent and is not: the host caches a dynamic result for 24 h
+ * under a fingerprint of its *own* empty static list, so a warm cache never
+ * calls the fetcher again, and a re-registration inside a session never re-runs
+ * discovery — the models merged at startup stay in the registry no matter what
+ * we filter. Both were measured: a hidden model came straight back after
+ * `/opencode2pi filter`, and one that had never been in the seed survived.
+ */
+function applyProvider(pi: ExtensionAPI): void {
+	const excluded = hidden()
+	const models = catalog.filter((model) => !excluded.has(model.id))
+	if (models.length === 0) {
+		// The host reads a provider with no models as a URL override and keeps the
+		// previous list, so a filter that hides everything would silently do
+		// nothing. Say so instead.
+		log?.warn(`[${PROVIDER}] 过滤规则隐藏了全部模型，模型列表不会缩小；用 /opencode2pi filter 放宽`)
+	}
 
 	pi.registerProvider(PROVIDER, {
 		baseUrl: ZEN_BASE,
@@ -166,24 +197,47 @@ export default function (pi: ExtensionAPI): void {
 		apiKey: ANONYMOUS_KEY,
 		authHeader: true,
 		headers: DISGUISE_HEADERS,
-		// The seed is what makes cold start work: async discovery cannot
-		// participate in `--model` resolution (docs/FINDINGS.md §7.3).
-		models: [...SEED_MODELS],
-		fetchDynamicModels: async (): Promise<readonly ProviderModelConfig[]> => {
-			const { models, diagnostics } = await discoverFreeModels()
-			for (const line of diagnostics) log?.info(`[${PROVIDER}] ${line}`)
-			return models
-		},
+		models: [...models],
 	})
+}
+
+/** Re-discover the free lane and republish. A failure keeps what we have. */
+async function refreshCatalog(pi: ExtensionAPI): Promise<void> {
+	const { models, diagnostics } = await discoverFreeModels()
+	for (const line of diagnostics) log?.info(`[${PROVIDER}] ${line}`)
+	if (models.length === 0) return
+	catalog = models
+	applyProvider(pi)
+}
+
+export default async function (pi: ExtensionAPI): Promise<void> {
+	log = pi.logger
+
+	// The stored choices are part of what the roster is, so they are adopted
+	// before the first registration rather than applied on the next probe.
+	publishFilters(await loadFilters())
+	publishHealth(await loadHealth())
+	onHiddenChange(() => applyProvider(pi))
+	applyProvider(pi)
+
+	// The host awaits extension factories and only then drains the registration
+	// queue (`extensibility/extensions/loader.ts`), so waiting here is what lets
+	// `--model provider/id` resolve an id that discovery found and the seed does
+	// not carry. The seed is already registered, so a discovery failure costs
+	// nothing but the wait — and that wait is the one the host imposed on itself
+	// back when it owned discovery.
+	await refreshCatalog(pi)
 
 	pi.registerCommand('opencode2pi', {
-		description: 'opencode2pi 诊断：doctor 检查形状闸门，status/probe 查看模型健康',
+		description:
+			'opencode2pi 诊断：doctor 检查形状闸门，status 显示上次探测结果，probe 重新探测全部模型，filter 设置隐藏规则',
 		handler: handleCommand,
 	})
 
 	pi.logger.info(
 		`[${PROVIDER}] registered · process session ${PROCESS_SESSION} · seed ${SEED_MODELS.length} models · ` +
-			`verified-free ${Object.keys(VERIFIED_FREE).length} · known-rejected ${Object.keys(UNAVAILABLE).length}`,
+			`verified-free ${Object.keys(VERIFIED_FREE).length} · known-rejected ${Object.keys(UNAVAILABLE).length} · ` +
+			`hidden ${hidden().size}`,
 	)
 }
 
