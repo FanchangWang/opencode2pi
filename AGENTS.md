@@ -130,9 +130,9 @@ ci → typecheck → test → 校验 tarball → `npm publish --provenance` → 
 
 一次 publish 同时服务 pi 和 omp（两者都从 npm 解析）。
 
-认证二选一：配了 `NPM_TOKEN` secret 就走 token；没有则走 OIDC Trusted Publishing，
-release 始终产出（`if: always()`）。首次发布必须用一次 token，因为 Trusted Publisher 要在
-包的 Settings 页配置。详见 `docs/DEVELOPMENT.md` §6。
+**认证：OIDC Trusted Publishing**（v0.3.1 起，仓库不再持有长期凭据）。
+首次发布用过一次 `NPM_TOKEN` secret，因为 Trusted Publisher 要在包的 Settings 页
+配置，而包必须先存在。详见 `docs/DEVELOPMENT.md` §6 / §6.1。
 
 ---
 

@@ -13,18 +13,23 @@
 ## 安装
 
 ```sh
-# 当前可用：从 git 装。注意：omp/pi 不支持 .tgz，只能用 git URL
+# 推荐：npm（已发布，自动带 provenance）
+omp install npm:opencode2pi
+pi  install npm:opencode2pi
+
+# 备用：git @stable（最近一次发版）
 omp install git:https://github.com/FanchangWang/opencode2pi@stable
 pi  install git:https://github.com/FanchangWang/opencode2pi@stable
-
-# npm 尚未上线（仓库没有 NPM_TOKEN，OIDC 首发也未配置），下面的命令暂时不可用：
-# omp install npm:opencode2pi
-# pi  install npm:opencode2pi
 
 # 追踪最新代码：装的是"此刻 main 指向的 commit"，含未发布的改动，之后不会自动更新
 omp install git:https://github.com/FanchangWang/opencode2pi@main
 pi  install git:https://github.com/FanchangWang/opencode2pi@main
 ```
+
+**为什么 npm 优先**：git 装的是源码快照，宿主要现读现编译；npm 装的是已发布的
+tarball，带 provenance 签名（可在 npmjs.com 包页面核验），且 tag 与版本号一一对应。
+注意 **omp/pi 不支持直接装 `.tgz` 文件**（实测报 `package.json not found`），
+所以只能用 npm spec 或 git URL。
 
 `@stable` 是最近一次发版的版本，随发版前移；要固定到某一版，去
 [releases](https://github.com/FanchangWang/opencode2pi/releases) 挑一个 tag，

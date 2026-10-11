@@ -5,8 +5,11 @@ name: Release
 # both resolve extensions out of the npm registry, and the pi.dev package gallery
 # indexes npm rather than having a registry of its own.
 #
-# Required repository secret: NPM_TOKEN (an npm automation token with publish
-# access to this package).
+# Authentication: the repository no longer holds a long-lived credential.
+# OIDC trusted publishing is configured for this package, so the `no secret`
+# path below is the live one. NPM_TOKEN remains supported as a fallback for
+# the first publish of a brand-new package (Trusted Publisher needs the
+# package to exist before its Settings page can be configured).
 
 on:
   push:
