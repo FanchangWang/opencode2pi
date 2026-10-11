@@ -24,13 +24,20 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          cache: npm
+          # setup-node v7 documents `package-manager-cache: false` as required
+          # in publishing workflows: the cache step writes into .npmrc, which
+          # can contaminate OIDC authentication. Every release now publishes
+          # through Trusted Publishing with no token present, so that risk is
+          # not hypothetical — it is the only authentication path we have.
+          # The cost is a cold `npm ci` per release, which is seconds for the
+          # 85 dev dependencies this package has.
+          package-manager-cache: false
 
       # `npm test` runs `bun test`; bun is not on stock runners.
       - uses: oven-sh/setup-bun@v2
