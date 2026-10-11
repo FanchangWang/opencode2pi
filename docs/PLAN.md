@@ -29,12 +29,12 @@ Working...
 OK
 ```
 
-8 个硬编码模型 id（`big-pickle` / `mimo-v2.6-flash-free` /
-`ling-3.0-flash-fin-free` / `ling-3.1-flash-free` /
-`nemotron-3.5-lightning-free` / `space-bunny-free` / `fledge-alpha-free` /
-`longcat-2.5-preview-free`），其中 `ling-3.0-flash-fin-free` 上游间歇 400/503 ——
-**按用户决定保留、不隐藏**。`mimo-v2.5-free` 已于 2026-10-08 实测下线，
-移入 `UNAVAILABLE`。名单每次同步都以 `/models` 实测为准，见 `FINDINGS.md` §2.1。
+7 个硬编码模型 id（`big-pickle` / `mimo-v2.6-flash-free` /
+`ling-3.1-flash-free` / `nemotron-3.5-lightning-free` / `space-bunny-free` /
+`fledge-alpha-free` / `longcat-2.5-preview-free`）。`mimo-v2.5-free` 已于
+2026-10-08 实测下线，`exo-free` / `jev-1.13-free` /
+`ling-3.0-flash-fin-free` 于 2026-10-11 实测 3/3 恒定被拒，一并移入
+`UNAVAILABLE`（见 `FINDINGS.md` §2.2）。名单每次同步都以 `/models` 实测为准。
 
 安装真实宿主类型包后 `tsc` 暴露了三个当时就存在的缺陷，已在 T1 一并修掉：
 
@@ -227,7 +227,7 @@ bun test
 
 | 决策 | 内容 |
 | --- | --- |
-| 间歇模型不隐藏 | `ling-3.0-flash-fin-free` 保留在列表里，上游 503 只标注不隐藏 |
+| 间歇模型不隐藏 | 429 / 超时 / 5xx 只标注不隐藏；但**恒定拒绝**（3/3 同一响应）判为下线并进 denylist —— `exo-free` / `jev-1.13-free` / `ling-3.0-flash-fin-free` 即依此改判 |
 | 一次失败不判死 | 连续两次 `ModelError` 才升级 ❌；任何一次成功清零（依据 `FINDINGS.md` §8.4） |
 | 健康默认只标注 | **自动**过滤模型列表永远不做；隐藏与否由用户在 `/opencode2pi filter` 里选，落盘到 `filters.json`（默认全不隐藏） |
 | 地区封锁立即判死 | `REGION_BLOCKED` 对同一出口是确定性的，命中即 ❌ |

@@ -133,12 +133,14 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 所以 429 说的不是「这个出口被打爆了」，而是「这个 id 的匿名额度用完了」——
 把它算成模型不稳定是**归错因**。
 
-同一个模型连续失败 10 次且每次响应完全一致（实测 `jev-1.13-free` 恒 500、
-`ling-3.0-flash-fin-free` 恒 400、`muse-spark-1.3-contributor-free` 恒 403），
-那是稳定的坏，不是抖动。真正会翻转的只有 429 额度和 `nemotron-3.ultra-free`
-那种 401→200。展示层把前者和后者画成同一个 ⚠️，才让通道显得不稳定。
+同一个模型连续失败 10 次且每次响应完全一致（实测 `muse-spark-1.3-contributor-free`
+恒 403；2026-10-11 又测出 `exo-free` / `jev-1.13-free` / `ling-3.0-flash-fin-free`
+三个恒 3/3 被拒，已据此进 denylist，见 `FINDINGS.md` §2.2），
+那是稳定的坏，不是抖动。真正会翻转的只有 429 额度和上线初期那种 401→200
+（已下线，见 `FINDINGS.md` §2.1）。展示层把前者和后者画成同一个 ⚠️，
+才让通道显得不稳定。
 
-探测本身也会烧配额：一次全扫是 13 个请求，打成突发会把下一轮自己的额度吃掉。
+探测本身也会烧配额：一次全扫是十几个请求，打成突发会把下一轮自己的额度吃掉。
 所以 `PROBE_CONCURRENCY` 是 2，每发一个请求后停 500ms。这**缓解**自伤，
 治不了 429 —— 429 本来就是按模型计的。
 

@@ -122,7 +122,7 @@ describe('free-lane judgment order (T2)', () => {
 	})
 
 	test('falls back to the name only when metadata is absent or incomplete', () => {
-		expect(isFreeModel('jev-1.13-free', undefined, VERIFIED_FREE)).toBe(true)
+		expect(isFreeModel('mystery-free', undefined, VERIFIED_FREE)).toBe(true)
 		expect(isFreeModel('mystery', undefined, VERIFIED_FREE)).toBe(false)
 		expect(isFreeModel('mystery-free', { id: 'mystery-free', cost: {} }, VERIFIED_FREE)).toBe(true)
 	})
@@ -297,10 +297,10 @@ describe('health verdicts (T5)', () => {
 	})
 
 	test('intermittent models keep a non-fatal mark', () => {
-		// ling-3.0-flash-fin-free answers 400 on this lane; it must never be ❌,
-		// and a 400 is evidence about the round rather than a state of its own.
+		// An id that answers 400 on this lane is evidence about the round, not a
+		// state of its own: it must never reach ❌ on one refusal.
 		expect(healthFor('REQUEST_REJECTED')).toBe('flaky')
-		expect(mergeHealth({}, [probe('ling-3.0-flash-fin-free', 'REQUEST_REJECTED', 'flaky')])['ling-3.0-flash-fin-free']?.health).toBe('flaky')
+		expect(mergeHealth({}, [probe('big-pickle', 'REQUEST_REJECTED', 'flaky')])['big-pickle']?.health).toBe('flaky')
 	})
 
 	test('an unrecognised failure is a transient, not a verdict of its own', () => {

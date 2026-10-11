@@ -41,15 +41,6 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
 		maxTokens: 32_000,
 	},
 	{
-		id: 'ling-3.0-flash-fin-free',
-		name: 'Ling 3.0 Flash Fin (free)',
-		reasoning: true,
-		input: ['text'],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 262_144,
-		maxTokens: 32_768,
-	},
-	{
 		id: 'ling-3.1-flash-free',
 		name: 'Ling 3.1 Flash (free)',
 		reasoning: true,
@@ -105,7 +96,6 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
 export const VERIFIED_FREE: Readonly<Record<string, true>> = {
 	'big-pickle': true,
 	'mimo-v2.6-flash-free': true,
-	'ling-3.0-flash-fin-free': true,
 	'ling-3.1-flash-free': true,
 	'nemotron-3.5-lightning-free': true,
 	'space-bunny-free': true,
@@ -121,9 +111,21 @@ export const VERIFIED_FREE: Readonly<Record<string, true>> = {
  * from the live lane (gone from `/models`, `401 ModelError`) while models.dev
  * still publishes it at zero cost — metadata alone would keep re-advertising
  * a dead id.
+ *
+ * `exo-free`, `jev-1.13-free` and `ling-3.0-flash-fin-free` (all measured
+ * 2026-10-11, three identical probes each) are the same shape of fact from
+ * the opposite direction: Zen still lists all three live and models.dev still
+ * prices two of them at zero, so S1 and S2 both vouch for ids the chat lane
+ * refuses. `ling-3.0-flash-fin-free` is the one that reverses a decision —
+ * it used to flip 400/503 and was deliberately kept while it still showed up
+ * in the catalogue, but it now answers `400 Model is unavailable` on every
+ * request, which is a refusal and not an outage.
  */
 export const UNAVAILABLE: Readonly<Record<string, string>> = {
 	'mimo-v2.5-free': '401 ModelError: not supported upstream (retired, measured 2026-10-08)',
+	'exo-free': '410 ModelDeprecated: deprecated upstream (3/3 measured 2026-10-11)',
+	'jev-1.13-free': '400 ModelProtocolUnsupported: not served on this protocol (3/3 measured 2026-10-11)',
+	'ling-3.0-flash-fin-free': '400 Model is unavailable (3/3 measured 2026-10-11)',
 	// Zen spells this with hyphens; the dotted spelling never matched a live id.
 	'nemotron-3-ultra-free': '401 ModelError: not supported upstream',
 	'muse-spark-1.2-contributor-free': '403 RegionError: blocked in this region',

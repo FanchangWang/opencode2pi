@@ -232,9 +232,9 @@ export async function discoverFreeModels(): Promise<DiscoveryResult> {
 			models.push(seed)
 			continue
 		}
-		// Live and free-by-name but entirely unknown (e.g. jev-1.13-free, which
-		// has no models.dev entry at all). Conservative on every capability: no
-		// reasoning, text only, host-generic limits — stated, not silent.
+		// Live and free-by-name but entirely unknown (no models.dev entry at
+		// all). Conservative on every capability: no reasoning, text only,
+		// host-generic limits — stated, not silent.
 		diagnostics.push(
 			`${id}: no metadata, free by name → conservative defaults ` +
 				`(${DEFAULT_CONTEXT_WINDOW}/${DEFAULT_MAX_TOKENS}, text only)`,

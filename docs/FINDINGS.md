@@ -54,10 +54,38 @@ stream:true  + 无 tools            →  403 FreeTierError
 | `big-pickle` / `mimo-v2.6-flash-free` / `nemotron-3.5-lightning-free` | ✅ 200 |
 | `space-bunny-free` / `fledge-alpha-free` / `longcat-2.5-preview-free` / `ling-3.1-flash-free` | ✅ 200 |
 | `mimo-v2.5-free` | 401 `ModelError: not supported`，且已从 `/models` 消失 → **已下线** |
-| `ling-3.0-flash-fin-free` / `exo-free` | 400 / 503 `Endpoint is unavailable`（上游 Console 抖动，保留） |
-| `jev-1.13-free` | 500 Internal server error（保留） |
+| `ling-3.0-flash-fin-free` / `exo-free` | 400 / 503 `Endpoint is unavailable`（当时记为抖动保留 → **§2.2 已改判**） |
+| `jev-1.13-free` | 500 Internal server error（当时记为保留 → **§2.2 已改判**） |
 | `nemotron-3.ultra-free` | 401 `ModelError` |
 | `muse-spark-1.2/1.3-contributor-free` | 403 `RegionError`（本地区封锁） |
+
+### 2.2 名单复测（2026-10-11）：三个 id 从「保留」翻成「拒绝」
+
+2026-10-08 那张表把 `exo-free` / `jev-1.13-free` / `ling-3.0-flash-fin-free`
+记成「上游抖动，保留」。同日用**同一份 `gate.ts`**（doctor 与探测共用的那份）
+各测 3 次，结果 3/3 完全一致：
+
+| id | 结果 | 判定依据 |
+| --- | --- | --- |
+| `exo-free` | 410 `ModelDeprecated` | 上游已下架 |
+| `jev-1.13-free` | 400 `ModelProtocolUnsupported` | 该协议根本不提供此模型 |
+| `ling-3.0-flash-fin-free` | 400 `Upstream request failed: Model is unavailable` | 上游侧拒绝 |
+
+三个都已进 `UNAVAILABLE`。注意**当时的保留理由本身有歧义**：
+它们出现在目录里、也没被标记黑名单，只是 API 测试不同 —— 这跟「上游明确
+拒绝」不是一回事。现在是后者，所以改判。`ling-3.0-flash-fin-free` 尤其
+关键：它此前是 400/503 反复翻转的，才被当成抖动保留；现在每次都稳定 400，
+那是拒绝而不是抖动。
+
+这也再次证明 §2.1 那条教训：这三个 id **至今仍被 `/models` 列出**，
+`exo-free` / `muse-spark-1.*` 甚至在 models.dev 上仍是 0 价，
+S1 与 S2 双重背书一个聊天层拒绝的 id —— 只有 denylist 挡得住。
+
+**mimo-v2.6-flash-free 的上下文窗口有分歧，本次不改**：models.dev 声明
+`limit.context: 200000`，opencode2dsh 用模型卡把它覆盖成 1048576
+（其 issue #17 报同一处不符，模型卡确写 1.05M）。我们实测能通但**测不出
+真实上限**，而两种错法的代价不对称：声明偏小只会提前压缩上下文（可恢复），
+声明偏大会让请求真的溢出（硬错误）。保守取 200000，等有实测再改。
 
 教训：**models.dev 的零定价元数据会滞后于下线**。`mimo-v2.5-free` 下线后
 models.dev 仍以 0 价发布，纯靠元数据判定会继续把死模型端上选择器 ——

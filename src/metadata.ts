@@ -179,8 +179,8 @@ export function normalizeEntry(entry: ModelsDevEntry): NormalizedModel {
  *     in opencode2dsh's list forever precisely because name-matching ran
  *     first, so price outranks name here;
  *  5. only when metadata is absent or incomplete does the `free` name
- *     heuristic apply — `jev-1.13-free` is live upstream with no models.dev
- *     entry at all, and is exactly this case.
+ *     heuristic apply — the branch exists for ids that are live upstream and
+ *     missing from models.dev entirely.
  */
 export function isFreeModel(
 	id: string,

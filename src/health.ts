@@ -11,9 +11,10 @@
  *
  *   dead  — upstream will never serve this id again (401 / 404 / ModelError /
  *           geo-block). Sticky: a later 503 does not resurrect it.
- *   flaky — unavailable *right now* (429 / 5xx / timeout). Never promoted to
- *           dead on transient evidence, which is exactly how
- *           `ling-3.0-flash-fin-free` would get wrongly struck off the roster.
+ *   flaky — unavailable *right now* (429 / 5xx / timeout / a rejected
+ *           request). Never promoted to dead on transient evidence, which is
+ *           how a model that is merely having a bad afternoon would get
+ *           wrongly struck off the roster.
  *
  * Health is annotation only. It never removes a model from the roster.
  */
@@ -119,8 +120,8 @@ export function healthFor(kind: UpstreamFailure | 'OK'): ModelHealth {
 			return 'limited'
 		// A request the upstream rejected is the model refusing this particular
 		// round, which is evidence about the request, not a state of the model:
-		// measured on `ling-3.0-flash-fin-free` it answers 400 for one input
-		// and works for the next. An unrecognised failure carries no more
+		// measured on this lane an id answers 400 for one request and works for
+		// the next. An unrecognised failure carries no more
 		// evidence than a 5xx does — the classifier simply did not recognise the
 		// text — so giving it a verdict of its own would invent a fifth state
 		// that only ever showed up in `status`.
