@@ -238,35 +238,111 @@ OIDC 路径下 npm CLI 会自动检测 CI 环境并改用短期凭据；**proven
 所以那条路径不加 `--provenance`。选 OIDC 前会先检查 `npm >= 11.5.1`，不够就明确报错，
 而不是让发布挂在后面报一个看不懂的 ENEEDAUTH。
 
-### 现状：npm 尚未发布，`Publish to npm` 步骤注定失败
+### 本机 registry 固定用官方源，但不改全局配置
 
-v0.1.1 / v0.2.0 / v0.2.1 三次发版的 `Publish to npm` 全部挂在 `ENEEDAUTH`：
-仓库没有 `NPM_TOKEN` secret，而 `opencode2pi` 在 npmjs.com 上还不存在
-（`npm view opencode2pi` → 404），没有包可以配置 Trusted Publisher。
+开发机全局 registry 是 `registry.npmmirror.com`（国内镜像），**刻意不改**：
+换掉会影响本机其它项目的依赖安装。本包所有 npm 操作一律用参数显式指定官方源，
+并固化成脚本，省得每次手打：
 
-所以 **GitHub Release + `stable` ref 前移才是当前唯一有效的发版产物**，
-README 的安装命令只给 git URL。要真正上 npm，必须先补一次 token 首发
-（`gh secret set NPM_TOKEN` → 删 tag 重推；版本号不可重用），
-此后 CI 才能走 OIDC。
+```sh
+npm run whoami         # npm --registry=https://registry.npmjs.org/ whoami
+npm run dry-run        # 打包预演，发布前必看
+npm run release:check  # typecheck + test + dry-run 三合一
+npm run registry <cmd> # 其余命令：npm run registry login / publish / view …
+```
 
-因为 workflow 里 publish 之后的步骤都带 `if: always()`，这个失败不会挡住
-Release 和 `stable`—— 但也意味着**没人盯着就会一直失败而无人察觉**，
-排查发版问题时先看 `Publish to npm` 这一步的结论。
+CI runner 默认就是 `registry.npmjs.org`，无需处理。
+
+### 首次发布：一次性 token，之后转 Trusted Publishing
+
+仓库此前没有 `NPM_TOKEN`，而 `opencode2pi` 在 npmjs.com 上还不存在
+（`npm view opencode2pi` → 404），没有包可以配置 Trusted Publisher ——
+所以 v0.1.1 / v0.2.0 / v0.2.1 / v0.3.0 四次发版的 `Publish to npm` 全部
+挂在 `ENEEDAUTH`，这是预期内的，不是配置错误。
+
+流程：**配一次 `NPM_TOKEN` → 首发成功 → 在包的 Settings 页配 Trusted Publisher
+→ 删掉 `NPM_TOKEN` secret**。之后 CI 走 OIDC，workflow 一行都不用改
+（`release.yml` 自动二选一，见上表）。具体步骤见上文「两种认证方式」小节。
+
+**token 是要长期保管的资产，不要提交进仓库、不要贴进聊天工具。**
 
 **Release 步骤始终执行**（`if: always()`），且 notes 会写明这次有没有发上 npm、
 走的是哪条认证路径。
 
-### 首次发布必须用一次 token
+## 6.1 从 token 迁到 Trusted Publishing（OIDC）完整步骤
 
-Trusted Publisher 是在 npmjs.com 的**包的 Settings 页面**里配置的，包还不存在时
-没有这个页面。所以第一次发布只能用 token（创建 token 时需要勾 2FA bypass）。
-配好 Trusted Publisher 后就可以删掉 `NPM_TOKEN` secret，workflow 不用再改。
+token 是**能用但要自己保管**的长期凭据：它躺在 GitHub secret 里，泄露了要手工吊销，
+还要防 CI 日志意外打印。OIDC（Trusted Publishing）是 npm 官方推荐方式 ——
+CI 用**一次性短期凭据**，由 GitHub 的 OIDC token 换取，没有可泄露的长期密钥，
+还能自动生成 provenance。两者产出的包完全一样，差别只在认证方式。
 
-### ⚠️ 配置 Trusted Publisher 时必须勾 "Allow npm publish"
+**第 1 步 · 拿 token（只做一次）**
 
-2026-09-03 之后新建的 Trusted Publisher 配置**默认只允许 `npm stage publish`**，
-是否同时允许直接 `npm publish` 需要手动勾选。本项目用的是 `npm publish`，不勾就会发布失败。
-而 **npm 保存配置时不校验**，错误只在真正发布那一刻才暴露。
+1. 登录 https://www.npmjs.com/settings/tokens
+2. 点 **Generate New Token → Granular Access Token**
+3. 勾选 2FA（账号已启用 2FA，这是创建 Granular token 的前提）
+4. **Package permissions**：选中 **Publishing**，其余留空（最小权限）
+5. **Expiration**：建议 90 天。过期后发布会失败，重新走一次即可
+6. 生成后**只显示一次**，立刻保存
+
+**第 2 步 · 写入 GitHub secret**
+
+```sh
+# 交互式输入，不回显、不进 shell history
+gh secret set NPM_TOKEN
+```
+
+粘贴 token 回车确认。验证（只看名字，值永不回显）：
+
+```sh
+gh secret list        # 应出现 NPM_TOKEN
+```
+
+**第 3 步 · 首发**
+
+打 tag 推上去，workflow 自动走 token 分支（`release.yml` 检测到 secret 就用
+`npm publish --provenance --access public`）。验证：
+
+```sh
+npm run whoami                              # 确认登录身份
+npm view opencode2pi --registry=https://registry.npmjs.org/
+```
+
+**第 4 步 · 在包的 Settings 页配 Trusted Publisher**
+
+前提：包已经存在（所以第 3 步得先成功）。
+
+1. https://www.npmjs.com/package/opencode2pi/settings/access 页面
+2. 找到 **Trusted Publisher**（部分账号在 **Settings → Trusted Publisher**）
+3. **Organization / GitHub organization**：`FanchangWang`（或你选的组织）
+4. **Repository**：`FanchangWang/opencode2pi`
+5. **Workflow filename**：`release.yml`
+   ⚠️ 填**文件名即可，不要填 `.github/workflows/release.yml`**，填错不会报错，
+   只在发布那一刻报权限错
+6. 勾选 **Allow npm publish**（**必须勾**，见上节）
+
+**第 5 步 · 删掉 secret，切到 OIDC**
+
+```sh
+gh secret delete NPM_TOKEN
+```
+
+此后 workflow 检测不到 secret，自动走 OIDC 分支。**workflow 文件不用改任何一行。**
+
+**验证切过去了**：再打一个新 tag 推上去，看 Actions 日志里 `Publish to npm`
+那一步打印的是 `No NPM_TOKEN; using OIDC trusted publishing.` 而不是
+`Authenticating with NPM_TOKEN.`。npmjs.com 包的 Versions 页面会显示
+provenance 徽章。
+
+### OIDC 常见故障对照
+
+| 现象 | 原因 | 处置 |
+| --- | --- | --- |
+| `npm <11.5.1 cannot use OIDC` | runner 的 npm 太老 | workflow 已提前拦截并明确报错；升级 setup-node 的 node-version |
+| `E401/E403 Unauthorized` | Trusted Publisher 的 org / repo / workflow 名填错 | 回上一步逐字核对，**workflow 只填文件名** |
+| 明明配了却仍走 token | secret 还没删 | `gh secret delete NPM_TOKEN` 后重推 tag |
+| provenance 徽章没出现 | 走了 token 分支且未加 `--provenance` | 迁到 OIDC 后由 npm 自动生成，无需手工加 |
+
 
 ### 其它
 

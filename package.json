@@ -45,7 +45,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "smoke": "omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle \"Reply with exactly OK\""
+	"smoke": "omp -e ./src/index.ts -p --model opencode-zen-free/big-pickle \"Reply with exactly OK\"",
+	"registry": "npm --registry=https://registry.npmjs.org/",
+	"whoami": "npm --registry=https://registry.npmjs.org/ whoami",
+	"dry-run": "npm --registry=https://registry.npmjs.org/ pack --dry-run",
+	"release:check": "npm run typecheck && npm test && npm run dry-run"
   },
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "^18.6.1",
