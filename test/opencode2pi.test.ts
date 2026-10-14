@@ -24,8 +24,9 @@ import {
 	type ProbeFilters,
 } from '../src/filters.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
-import { canonicalSessionID, invertedTimestampHex, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
+import { canonicalSessionID, clientProjectID, descendingTimePart, PROCESS_SESSION, sessionForRequest, sessionHeaders } from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
+import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from '../src/tools.ts'
 
 const CANONICAL = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 
@@ -202,93 +203,105 @@ describe('session identity (T3)', () => {
 })
 
 /**
- * Upstream's own encoder, transcribed into the test as the oracle: the 12 hex
- * characters are `~(timestamp * 0x1000 + counter)`, counter in the low 12
- * bits. Comparing against a reimplementation of the same formula inside the
- * module under test would prove nothing, so the oracle is deliberately a
- * separate derivation (per-byte shifts) of the same spec.
+ * Upstream's own encoder, transcribed into the test as the oracle: six hash
+ * bytes become a 36-bit pseudo-clock shifted into the top of a 48-bit word,
+ * ORed with counter 1, then bitwise-NOT-ed (opencode2api #70). The oracle is
+ * deliberately a separate derivation (per-byte shifts, matching the Go
+ * reference) of the same spec.
  */
-function upstreamTimeHex(descending: boolean, timestamp: number, counter: number): string {
-	const current = BigInt(timestamp) * 0x1000n + BigInt(counter)
-	const value = descending ? ~current : current
+function upstreamDescendingTimePart(hash: Uint8Array): string {
+	const b0 = hash[0] ?? 0
+	const b1 = hash[1] ?? 0
+	const b2 = hash[2] ?? 0
+	const b3 = hash[3] ?? 0
+	const b4 = hash[4] ?? 0
+	const current = (BigInt(b0) << 28n | BigInt(b1) << 20n | BigInt(b2) << 12n | BigInt(b3) << 4n | BigInt(b4) >> 4n) << 12n
+	const inverted = ~(current | 1n) & 0xffffffffffffn
 	return Array.from({ length: 6 }, (_, index) =>
-		Number((value >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, '0'),
+		Number((inverted >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, '0'),
 	).join('')
 }
 
-describe('session clock (issue #62, 2026-10-14)', () => {
-	test('invertedTimestampHex reproduces upstream byte-for-byte', () => {
-		// Fixed clocks, so these are exact vectors rather than "close enough"
-		// comparisons against a live Date.now() the process may tick past.
-		expect(invertedTimestampHex(0)).toBe(upstreamTimeHex(true, 0, 1))
-		expect(invertedTimestampHex(1)).toBe(upstreamTimeHex(true, 1, 1))
-		expect(invertedTimestampHex(1_000_000_000_000)).toBe(upstreamTimeHex(true, 1_000_000_000_000, 1))
-		expect(invertedTimestampHex(1_791_884_044_070)).toBe(upstreamTimeHex(true, 1_791_884_044_070, 1))
+describe('session clock (upstream gate, 2026-10-15)', () => {
+	test('descendingTimePart reproduces upstream byte-for-byte', () => {
+		for (const signal of ['a', 'b', '"hello"', 'omp:01a10bfe-9111-744a']) {
+			const hash = createHash('sha256').update('ses\x00' + signal).digest().subarray(0, 6)
+			expect(descendingTimePart(hash)).toBe(upstreamDescendingTimePart(hash))
+		}
 	})
 
 	test('counter 1 inverts to a time segment ending in ffe', () => {
-		// Structural consequence of the inversion, not a magic marker: it is
-		// the string-level tell that separates a real clock from a digest.
-		for (const clock of [0, 1, 1_000_000_000_000, 1_791_884_044_070, Date.now()]) {
-			expect(invertedTimestampHex(clock).slice(9, 12)).toBe('ffe')
-		}
-		// Descending: a later clock sorts earlier as a plain string, which is
-		// what upstream relies on to order sessions.
-		expect(invertedTimestampHex(1_000) < invertedTimestampHex(999)).toBe(true)
-	})
-
-	test('canonicalSessionID emits a live clock, not a digest', () => {
-		// A fresh signal each time, so the memo cannot mask a wrong clock.
-		for (let i = 0; i < 5; i++) {
-			const before = Date.now()
-			const session = canonicalSessionID(`live-clock-probe-${i}`)
-			const after = Date.now()
-			expect(session).toMatch(CANONICAL)
-
-			const hex = session.slice('ses_'.length, 'ses_'.length + 12)
-			// Our live clock must equal what upstream's encoder would emit for
-			// some clock inside the window the test just measured.
-			const inWindow = [...Array(after - before + 1).keys()].some(
-				(offset) => hex === upstreamTimeHex(true, before + offset, 1),
-			)
-			expect(inWindow).toBe(true)
+		// Structural consequence of the inversion: the low 12 bits decode
+		// (after NOT) to counter 1, which is inside the free tier's [1, 63]
+		// acceptance window — the string-level tell that the layout is valid.
+		for (const signal of ['a', 'b', 'live-probe', 'omp:some-uuid']) {
+			const hex = canonicalSessionID(signal).slice('ses_'.length, 'ses_'.length + 12)
 			expect(hex.slice(9, 12)).toBe('ffe')
 		}
 	})
 
-	test('the pre-fix digest prefix could never satisfy the counter check', () => {
-		// The exact pre-fix derivation, kept as a control so the regression
-		// cannot come back unnoticed: shape-valid, and still wrong.
-		const signal = '"hello"'
-		const sum = createHash('sha256').update('ses\x00' + signal).digest()
-		const digestHex = sum.subarray(0, 6).toString('hex')
-		expect(`ses_${digestHex}`).toMatch(/^ses_[0-9a-f]{12}/)
-
-		// If the 12 hex chars really were ~(clock * 0x1000 + counter), the low
-		// 12 bits must decode to a small per-millisecond counter. A digest
-		// decodes to an absurd one instead.
-		const asCounter = ~(BigInt(`0x${digestHex}`) & 0xfffn) & 0xfffn
-		expect(asCounter > 0x100n).toBe(true)
-
-		// And the fixed id always carries counter = 1.
-		const fixed = canonicalSessionID(signal).slice('ses_'.length, 'ses_'.length + 12)
-		expect((~(BigInt(`0x${fixed}`) & 0xfffn) & 0xfffn) === 1n).toBe(true)
+	test('derivation is deterministic and state-free', () => {
+		// No memo, no clock: the same signal maps to the same id forever, and
+		// distinct signals never collide.
+		const once = canonicalSessionID('stable-signal')
+		expect(canonicalSessionID('stable-signal')).toBe(once)
+		expect(canonicalSessionID('other-signal')).not.toBe(once)
 	})
 
-	test('a conversation minted earlier keeps its session across a clock tick', () => {
-		// The whole id is memoized per conversation: a retry, or a later turn,
-		// must reuse it, because upstream groups free-tier quota and prompt
-		// cache by session. Re-reading a live clock here would silently break
-		// both.
-		const signal = 'clock-tick-sensitivity-probe'
-		const before = canonicalSessionID(signal)
-		const clockAtFirstCall = invertedTimestampHex()
-		const end = Date.now() + 5
-		while (Date.now() < end) {
-			/* burn a few milliseconds so the clock really moves */
+	test('a genuine client session passes through unchanged', () => {
+		// 12 hex with the low 12 bits in [0xFC0, 0xFFF] (counter 1-63) + 14
+		// base62 tail — what a real OpenCode client emits.
+		const genuine = 'ses_123456789ffeABCDEFGHIJKLMN'
+		expect(canonicalSessionID(genuine)).toBe(genuine)
+	})
+
+	test('a foreign ses_ layout is re-encoded, not forwarded', () => {
+		// Low 12 bits '012' decode to a counter far beyond 63: the regex
+		// matches but the layout check rejects, so upstream would 403 the
+		// forwarded id. It must be re-encoded into the validated layout.
+		const foreign = 'ses_123456789012ABCDEFGHIJKLMN'
+		const re = canonicalSessionID(foreign)
+		expect(re).not.toBe(foreign)
+		expect(re).toMatch(CANONICAL)
+		expect(re.slice('ses_'.length, 'ses_'.length + 12).slice(9, 12)).toBe('ffe')
+	})
+
+	test('session headers carry the full client fingerprint', () => {
+		// Dropping x-opencode-session-id makes the upstream 403 (FINDINGS
+		// §2.4), so every header must mirror the session id.
+		const session = 'ses_123456789ffeABCDEFGHIJKLMN'
+		const headers = sessionHeaders(session)
+		expect(headers['x-opencode-session']).toBe(session)
+		expect(headers['x-opencode-session-id']).toBe(session)
+		expect(headers['X-Session-Id']).toBe(session)
+	})
+
+	test('clientProjectID renders a bare 40-hex project id', () => {
+		// The prj_ prefix is rejected upstream; a bare 40-char lowercase hex
+		// is what the client sends (FINDINGS §2.4).
+		const id = clientProjectID('omp:default-project')
+		expect(id).toMatch(/^[0-9a-f]{40}$/)
+		expect(id.startsWith('prj_')).toBe(false)
+	})
+})
+
+describe('gate tools (definition check, 2026-10-15)', () => {
+	test('shell and read carry genuine definitions, not stubs', () => {
+		// The free tier validates the definition of every tool it recognises
+		// (FINDINGS §2.4): a stub 403s even under the right name.
+		for (const name of GATE_TOOL_NAMES) {
+			const tool = gateTool(name)
+			expect(tool.description.length).toBeGreaterThan(100)
+			expect((tool.parameters as Record<string, unknown>).required).toBeDefined()
 		}
-		expect(invertedTimestampHex()).not.toBe(clockAtFirstCall)
-		expect(canonicalSessionID(signal)).toBe(before)
+	})
+
+	test('every OPENCODE_TOOLS entry is used by the gate set', () => {
+		// The source of truth is upstream's own tool JSON; gateTool must never
+		// drift back to a synthesised stub.
+		expect(OPENCODE_TOOLS.shell).toBeDefined()
+		expect(OPENCODE_TOOLS.read).toBeDefined()
+		expect(OPENCODE_TOOLS.bash).toBeUndefined()
 	})
 })
 

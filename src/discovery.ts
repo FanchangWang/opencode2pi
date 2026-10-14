@@ -29,7 +29,8 @@ import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from './metadata.ts'
 import { SEED_MODELS, VERIFIED_FREE } from './seed.ts'
 
-const ZEN_BASE = 'https://opencode.ai/zen/v1'
+/** The anonymous free lane moved off /zen onto its own host on 2026-10-14 (opencode2api v1.3.9). */
+const ANONYMOUS_BASE = 'https://opencode.ai/inference/v1'
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const MODELS_DEV_PROVIDER = 'opencode'
 const ANONYMOUS_KEY = 'public'
@@ -150,9 +151,9 @@ export function loadMetadata(): Promise<MetadataOutcome> {
 	return metadataInflight
 }
 
-/** Live catalogue straight from Zen: the authority on what exists right now. */
+/** Live catalogue straight from the anonymous lane: the authority on what exists right now. */
 async function fetchLiveModelIds(): Promise<string[]> {
-	const response = await fetch(`${ZEN_BASE}/models`, {
+	const response = await fetch(`${ANONYMOUS_BASE}/models`, {
 		signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		headers: { accept: 'application/json', authorization: `Bearer ${'public'}` },
 	})
@@ -183,7 +184,7 @@ export async function discoverFreeModels(): Promise<DiscoveryResult> {
 
 	const [live, metadata] = await Promise.all([
 		fetchLiveModelIds().catch((error: unknown) => {
-			diagnostics.push(`S1 Zen /models unavailable (${String(error)}) → seed candidates`)
+			diagnostics.push(`S1 anonymous /models unavailable (${String(error)}) → seed candidates`)
 			return undefined
 		}),
 		loadMetadata(),
@@ -202,7 +203,7 @@ export async function discoverFreeModels(): Promise<DiscoveryResult> {
 
 	// S3: the seed is always a candidate, so a Zen outage cannot empty the list.
 	const candidates = live ?? SEED_MODELS.map((model) => model.id)
-	if (live) diagnostics.push(`S1 Zen /models: ${live.length} ids live`)
+	if (live) diagnostics.push(`S1 anonymous /models: ${live.length} ids live`)
 
 	const models: ProviderModelConfig[] = []
 	const seen = new Set<string>()

@@ -29,7 +29,7 @@ export interface Classification {
 }
 
 const ADVICE: Readonly<Record<UpstreamFailure, string>> = {
-	SHAPE_REJECTED: '上游形状闸门拒绝（FreeTierError）：通常是本扩展的 bug，请提 issue。闸门需要 Bearer public + 规范 session id（12 位 hex 是位取反真实时钟，低 12 位解码为逐毫秒计数器、须落在 [0,63]，摘要填充会被 403）+ tools 里同时有 bash 和 read。',
+	SHAPE_REJECTED: '上游形状闸门拒绝（FreeTierError）：通常是本扩展的 bug，请提 issue。闸门需要 Bearer public + 规范 session id（12 位 hex 低 12 位解码为逐毫秒计数器、须落在 [1,63]，摘要填充会被 403）+ tools 里 shell/read 用真实 OpenCode 定义 + 请求打 https://opencode.ai/inference/v1。',
 	REGION_BLOCKED: '该模型在当前网络地区不可用（RegionError）：这是地区封锁，不是凭据问题，换一个模型或网络节点。',
 	MODEL_GONE: '模型已下线（ModelError）：上游已不再支持该模型，请查看可用模型列表。',
 	RATE_LIMIT: '匿名配额按出口 IP 限流（429）：等待配额恢复，或设置 PI_PROXY_OPENCODE_ZEN_FREE 换出口（宿主按 provider id 派生命名：opencode-zen-free → OPENCODE_ZEN_FREE）。',

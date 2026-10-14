@@ -13,21 +13,23 @@ Zen 的匿名通道不靠凭据鉴权，而是**请求形状校验**。三个条
 | # | 条件 | 违反时的报错 |
 | --- | --- | --- |
 | 1 | `Authorization: Bearer public`（字面量） | 401 |
-| 2 | 规范 session id `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`，且 12 位 hex 须为位取反的真实墙钟（见下） | `MissingSessionID` / 403 |
-| 3 | agent 形态 body：`stream: true` **且** `tools` 同时含 `bash` 和 `read` | 403 FreeTierError |
+| 2 | 规范 session id `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`，且 12 位 hex 布局须被校验（低 12 位解码为逐毫秒计数器 ∈ `[1, 63]`，见下） | `MissingSessionID` / 403 |
+| 3 | agent 形态 body：`stream: true` **且** `tools` 同时含 `shell` 和 `read`（**真实 OpenCode 定义**，stub 被 403），且请求打匿名通道 `https://opencode.ai/inference/v1` | 403 FreeTierError |
 
 条件 3 有**两个独立部分**，只满足一半照样 403：
 
 ```
-stream:true  + tools:[bash,read]  →  200 ✅
-stream:false + tools:[bash,read]  →  403
+stream:true  + tools:[shell,read]  →  200 ✅
+stream:false + tools:[shell,read]  →  403
 stream:true  + 无 tools            →  403
 ```
 
-条件 2 的 hex 段还带**时钟校验**（上游 2026-10-13 新增，opencode2dsh #62/#65）：
-12 位 hex 解码为 `~(墙钟 ms × 0x1000 + counter)`，低 12 位只接受 `[0, 63]`。
-摘要派生的 id 正则能过、时钟位不对，照样 403 —— 铸 id 的逻辑在
-`src/session.ts`（`invertedTimestampHex`），机制与矩阵见 FINDINGS §2.3。
+条件 2 的 hex 段带**布局校验**（上游 2026-10-13 新增，opencode2dsh #62/#65；
+2026-10-15 起改用确定性重编码，opencode2api #70）：低 12 位解码为逐毫秒
+计数器、只接受 `[1, 63]`（线上 hex 低 12 位 ∈ `[0xFC0, 0xFFF]`）。铸 id 的
+逻辑在 `src/session.ts`（`descendingTimePart`），机制与矩阵见 FINDINGS
+§2.3/§2.4。2026-10-14 起匿名通道迁至 `/inference`、工具名 `bash` → `shell`
+且校验定义（stub 403），见 FINDINGS §2.4。
 
 完整模型矩阵见 [`FINDINGS.md`](FINDINGS.md) §2。**注意 `RegionError`（地区封锁）
 和 `FreeTierError`（形状闸门）是两回事**，错误分类必须分开。

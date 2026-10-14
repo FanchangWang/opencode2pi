@@ -19,14 +19,14 @@
 | # | 条件 | 违反时的报错 |
 | --- | --- | --- |
 | 1 | `Authorization: Bearer public`（字面量 `public`） | 401 |
-| 2 | 规范 session id：`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（12 hex + 14 base62 = 26 字符总长），**且 12 位 hex 是位取反真实时钟**（低 12 位解码为逐毫秒计数器，须落在 `[0, 63]`）——2026-10-13 起「形状正确」不再够用，详见 §2.3 | `MissingSessionID` / 403 |
-| 3 | **agent 形态 body**：`stream: true` **且** `tools` 里同时有 `bash` 和 `read` | 403 FreeTierError |
+| 2 | 规范 session id：`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（12 hex + 14 base62 = 26 字符总长），**且 12 位 hex 的布局要被校验**（低 12 位解码为逐毫秒计数器，须落在 `[1, 63]`，即线上 hex 低 12 位 ∈ `[0xFC0, 0xFFF]`）——2026-10-13 起「形状正确」不再够用，详见 §2.3/§2.4 | `MissingSessionID` / 403 |
+| 3 | **agent 形态 body**：`stream: true` **且** `tools` 里同时有 `shell` 和 `read`（**真实 OpenCode 定义**，stub 定义被 403），且请求打**匿名通道** `https://opencode.ai/inference/v1`——2026-10-14 起 keyless 通道离开 `/zen`，详见 §2.4 | 403 FreeTierError |
 
 条件 3 有**两个独立的部分**，只满足一半仍然403：
 
 ```
-stream:true  + tools:[bash,read]  →  200 ✅
-stream:false + tools:[bash,read]  →  403 FreeTierError   ← 非流式一律被拒
+stream:true  + tools:[shell,read]  →  200 ✅
+stream:false + tools:[shell,read]  →  403 FreeTierError   ← 非流式一律被拒
 stream:true  + 无 tools            →  403 FreeTierError
 ```
 
@@ -126,6 +126,37 @@ prompt cache 亲和保留；整个 id 按会话信号 memo（FIFO 1024），重�
 不充分——回归测试必须把上游编码器当 oracle 逐字节钉死
 （test/opencode2pi.test.ts「session clock」组），而不是在同一模块里重写
 一遍公式自证。
+
+### 2.4 匿名通道迁移与工具定义校验（2026-10-15 上游变更 · 本地实测）
+
+2026-10-14 深夜上游把 keyless 免费通道整体改造，opencode2api v1.3.9
+（commit `f8e996d`/`be91f86`）为此发布修复。本仓库 2026-10-15 用
+`gate.ts` 同形探针复现：**修复前的请求形状（/zen + bash/read stub + 旧 UA +
+`prj_` 前缀 project）返回 403 FreeTierError，扩展整体失效**。逐变量归因
+（其余全部保持 v1.3.9 形状，只改一个变量）：
+
+| 变量 | 实测 | 结论 |
+| --- | --- | --- |
+| URL `/zen/v1` → 保持 `/zen` | 403 | **硬条件**：匿名通道迁至 `https://opencode.ai/inference/v1` |
+| 删 `x-opencode-session-id` 头 | 403 | **硬条件**：该头必需（客户端指纹的一部分） |
+| `x-opencode-project` 用 `prj_` 前缀 | 403 | **硬条件**：必须是裸 40 位小写 hex（`sha256("opencode-project\0"+project)` 截 20 字节） |
+| tools 用 stub 定义（即使名字是 shell） | 403 | **硬条件**：上游校验认识的工具的**定义**（description + schema），stub 一律 403 |
+| tools 用 shell/read **真实定义** | 200 | 最小集 `shell`+`read` 真实定义即可通过 |
+| User-Agent 用旧格式 `opencode/1.18.31 (…)` | 200 | 暂兼容，但上游期望 `opencode/latest/2.0.29/cli`，一并换掉 |
+| `/models` 列表打 `/zen` 还是 `/inference` | 均 200（85 id） | 非硬条件，统一迁移防 `/zen` 停服 |
+
+要点：
+
+- **工具名从 `bash` 变成 `shell`**（OpenCode 2.x 的名字）。旧 `bash` 拼写不再
+  注入——上游校验定义，合成 bash 定义与官方不匹配照样 403。真实定义照抄
+  opencode2api `opencode_tools.json`（本仓库 `src/tools.ts` 只取 `shell`/`read`）。
+- **会话 id 不再需要真实时钟**（opencode2api #70）：既然只查低 12 位
+  （counter ∈ [1,63]，hex 低 12 位 ∈ `[0xFC0, 0xFFF]`），就用 sha256 前 6
+  字节确定性派生「36 位伪时钟 << 12 | counter 1」再取反——同会话恒同 id、
+  零状态（无 memo、无时钟）；`ses_` 形状但布局不对的 foreign id（旧摘要
+  填充/ascending）也被重编码而不是透传。§2.3 的 memo/真实时钟方案被此取代。
+- 教训：**闸门条件的组合会整体换代**——一个变量（endpoint、头、工具定义）
+  变了就是全量 403，`doctor` 只测形状是不够的，必须用真实请求形状归因。
 
 ## 3. omp 扩展 API 的实测行为
 

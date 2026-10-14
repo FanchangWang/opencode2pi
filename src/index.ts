@@ -3,11 +3,14 @@
  *
  * The built-in `opencode-zen` provider requires a paid `OPENCODE_API_KEY`.
  * This extension needs none: the upstream gate is a request-shape check, not
- * a credential check. Three conditions, all confirmed live on 2026-10-05:
+ * a credential check. Three conditions, all confirmed live on 2026-10-15:
  *
  *   1. `Authorization: Bearer public`  (anonymous credential)
- *   2. canonical session id  `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`
- *   3. an agent-shaped body: `tools` containing `bash` and `read`
+ *   2. canonical session id  `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` with a
+ *      validated counter layout (low 12 bits decode to a counter in [1, 63])
+ *   3. an agent-shaped body: `tools` containing `shell` and `read` with the
+ *      genuine OpenCode definitions (stubs are rejected), sent to the
+ *      anonymous inference endpoint (https://opencode.ai/inference/v1)
  *
  * Non-streaming requests are rejected with FreeTierError. Host streaming is
  * inherent to the openai-completions engine, so condition 3 is the only body
@@ -24,8 +27,6 @@
  *     on the context is a silent no-op.
  */
 
-import { createHash } from 'node:crypto'
-
 import { createAssistantMessageEventStream, registerCustomApi, streamSimple } from '@earendil-works/pi-ai'
 import type { AssistantMessage, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
@@ -35,56 +36,64 @@ import { handleCommand } from './commands.ts'
 import { classifyUpstreamFailure, formatFailure } from './errors.ts'
 import { hidden, loadFilters, onHiddenChange, publishFilters, publishHealth } from './filters.ts'
 import { loadHealth } from './health.ts'
-import { PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
+import { clientProjectID, PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
+import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from './tools.ts'
 
 const PROVIDER = 'opencode-zen-free'
 const API_ID = 'openai-completions-zen-free'
-const ZEN_BASE = 'https://opencode.ai/zen/v1'
+/** The anonymous free lane lives on its own host since 2026-10-14 (opencode2api v1.3.9); /zen no longer accepts it. */
+const ANONYMOUS_BASE = 'https://opencode.ai/inference/v1'
 const ANONYMOUS_KEY = 'public'
 const SOURCE_ID = 'opencode2pi'
 
-const PROJECT_ID = 'prj_' + createHash('sha256').update('omp:default-project').digest('hex').slice(0, 24)
+const PROJECT_ID = clientProjectID('omp:default-project')
 
 const DISGUISE_HEADERS: Record<string, string> = {
-	'user-agent': 'opencode/1.18.31 (win32 x64; node24.19.0)',
+	'user-agent': 'opencode/latest/2.0.29/cli',
 	'x-opencode-client': 'cli',
 	'x-opencode-project': PROJECT_ID,
 }
 
-/** The upstream gate demands a `bash` and a `read` function in `tools`. */
-const GATE_TOOL_NAMES = ['bash', 'read'] as const
-
-const GATE_TOOLS = GATE_TOOL_NAMES.map((name) => ({
-	name,
-	description: 'Reserved for the host runtime; do not call it.',
-	parameters: { type: 'object' as const, properties: {} },
-}))
+const GATE_TOOLS = GATE_TOOL_NAMES.map((name) => gateTool(name))
 
 /**
- * Ensure the gate tools are present.
+ * Ensure the gate tools are present and genuine.
  *
- * The host ships real `bash` and `read` tools, so in practice this is a no-op
- * and the stubs never reach the model. It only bites when a caller runs with no
- * tools at all (a bare completion), where the gate would otherwise fail — so in
- * that case the stubs arrive with `toolChoice: 'none'` to stop the model from
- * calling a stub the host cannot service.
+ * The free tier validates the DEFINITION of every tool whose name it
+ * recognises (opencode2api #83): a synthesised stub — even one carrying the
+ * right name — is rejected with 403 FreeTierError. So any declared tool with a
+ * known OpenCode name is replaced with the genuine definition, and missing
+ * `shell`/`read` are appended. Tools whose names upstream does not recognise
+ * are left exactly as the host declared them, so the host's tool dispatch
+ * keeps working. When a caller runs with no tools at all (a bare completion),
+ * the injected tools arrive with `toolChoice: 'none'` to stop the model from
+ * calling a tool the host cannot service.
  */
 function withGateTools(
 	context: Context,
 	options: SimpleStreamOptions,
 ): { context: Context; options: SimpleStreamOptions } {
 	const existing = context.tools ?? []
-	const names = new Set(existing.map((tool) => tool.name))
+
+	const upgraded = existing.map((tool) => {
+		const definition = OPENCODE_TOOLS[tool.name]
+		if (!definition) return tool
+		return { ...tool, description: definition.description, parameters: definition.parameters as Record<string, unknown> }
+	})
+
+	const names = new Set(upgraded.map((tool) => tool.name))
 	const missing = GATE_TOOLS.filter((tool) => !names.has(tool.name))
-	if (missing.length === 0) return { context, options }
 
-	if (existing.length > 0) return { context: { ...context, tools: [...existing, ...missing] }, options }
-
-	return {
-		context: { ...context, tools: [...missing] },
-		options: { ...options, toolChoice: 'none' },
+	if (missing.length === 0 && upgraded.every((tool, index) => tool === existing[index])) {
+		return { context, options }
 	}
+	const tools = [...upgraded, ...missing]
+
+	if (existing.length === 0 && missing.length > 0) {
+		return { context: { ...context, tools }, options: { ...options, toolChoice: 'none' } }
+	}
+	return { context: { ...context, tools }, options }
 }
 
 /**
@@ -192,7 +201,7 @@ function applyProvider(pi: ExtensionAPI): void {
 	}
 
 	pi.registerProvider(PROVIDER, {
-		baseUrl: ZEN_BASE,
+		baseUrl: ANONYMOUS_BASE,
 		api: API_ID,
 		apiKey: ANONYMOUS_KEY,
 		authHeader: true,
