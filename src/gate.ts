@@ -43,7 +43,10 @@ function gateTools() {
 /** The three gate conditions, restated so a failing `doctor` is actionable. */
 export const GATE_CONDITIONS: readonly string[] = [
 	'Authorization: Bearer public',
-	'canonical session id  ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$',
+	// Shape alone stopped being sufficient on 2026-10-13: the free tier reads
+	// the low 12 bits of the 12 hex characters back as a per-millisecond
+	// counter and accepts only [0, 63] (docs/FINDINGS.md §2, issue #62).
+	'canonical session id  ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$  with a real inverted clock in the hex segment',
 	'agent-shaped body: stream:true and tools containing bash and read',
 ]
 /**

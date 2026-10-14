@@ -10,6 +10,8 @@
 
 import { describe, expect, test } from 'bun:test'
 
+import { createHash } from 'node:crypto'
+
 import { healthFor, mergeHealth, pruneHealth, summarizeHealth, type HealthRecord, type HealthStore, type ProbeResult } from '../src/health.ts'
 import { classifyUpstreamFailure } from '../src/errors.ts'
 import {
@@ -22,7 +24,7 @@ import {
 	type ProbeFilters,
 } from '../src/filters.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
-import { canonicalSessionID, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
+import { canonicalSessionID, invertedTimestampHex, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
 
 const CANONICAL = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
@@ -86,6 +88,22 @@ describe('capability mapping (T1)', () => {
 		const { config } = normalizeEntry({ id: 't', reasoning: true, reasoning_options: [{ type: 'toggle' }] })
 		expect(config.reasoning).toBe(true)
 		expect(config.thinking).toBeUndefined()
+	})
+
+	test('applies the local mimo context override, and never silently', () => {
+		// models.dev publishes 200000; the MiMo model card and the official
+		// CLI config both declare 1048576 (FINDINGS §2.2, 2026-10-14 改判).
+		const { config, notes } = normalizeEntry({ id: 'mimo-v2.6-flash-free', limit: { context: 200_000, output: 32_000 } })
+		expect(config.contextWindow).toBe(1_048_576)
+		expect(notes.join(' ')).toContain('200000 → 1048576')
+	})
+
+	test('the override stops firing once the feed publishes the corrected value', () => {
+		// Values match → no note. The entry is not deleted; it stays as a
+		// regression guard should the feed drift back to 200000.
+		const { config, notes } = normalizeEntry({ id: 'mimo-v2.6-flash-free', limit: { context: 1_048_576, output: 32_000 } })
+		expect(config.contextWindow).toBe(1_048_576)
+		expect(notes.join(' ')).not.toContain('override')
 	})
 })
 
@@ -180,6 +198,97 @@ describe('session identity (T3)', () => {
 	test('canonicalSessionID is idempotent', () => {
 		const once = canonicalSessionID('anything')
 		expect(canonicalSessionID(once)).toBe(once)
+	})
+})
+
+/**
+ * Upstream's own encoder, transcribed into the test as the oracle: the 12 hex
+ * characters are `~(timestamp * 0x1000 + counter)`, counter in the low 12
+ * bits. Comparing against a reimplementation of the same formula inside the
+ * module under test would prove nothing, so the oracle is deliberately a
+ * separate derivation (per-byte shifts) of the same spec.
+ */
+function upstreamTimeHex(descending: boolean, timestamp: number, counter: number): string {
+	const current = BigInt(timestamp) * 0x1000n + BigInt(counter)
+	const value = descending ? ~current : current
+	return Array.from({ length: 6 }, (_, index) =>
+		Number((value >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, '0'),
+	).join('')
+}
+
+describe('session clock (issue #62, 2026-10-14)', () => {
+	test('invertedTimestampHex reproduces upstream byte-for-byte', () => {
+		// Fixed clocks, so these are exact vectors rather than "close enough"
+		// comparisons against a live Date.now() the process may tick past.
+		expect(invertedTimestampHex(0)).toBe(upstreamTimeHex(true, 0, 1))
+		expect(invertedTimestampHex(1)).toBe(upstreamTimeHex(true, 1, 1))
+		expect(invertedTimestampHex(1_000_000_000_000)).toBe(upstreamTimeHex(true, 1_000_000_000_000, 1))
+		expect(invertedTimestampHex(1_791_884_044_070)).toBe(upstreamTimeHex(true, 1_791_884_044_070, 1))
+	})
+
+	test('counter 1 inverts to a time segment ending in ffe', () => {
+		// Structural consequence of the inversion, not a magic marker: it is
+		// the string-level tell that separates a real clock from a digest.
+		for (const clock of [0, 1, 1_000_000_000_000, 1_791_884_044_070, Date.now()]) {
+			expect(invertedTimestampHex(clock).slice(9, 12)).toBe('ffe')
+		}
+		// Descending: a later clock sorts earlier as a plain string, which is
+		// what upstream relies on to order sessions.
+		expect(invertedTimestampHex(1_000) < invertedTimestampHex(999)).toBe(true)
+	})
+
+	test('canonicalSessionID emits a live clock, not a digest', () => {
+		// A fresh signal each time, so the memo cannot mask a wrong clock.
+		for (let i = 0; i < 5; i++) {
+			const before = Date.now()
+			const session = canonicalSessionID(`live-clock-probe-${i}`)
+			const after = Date.now()
+			expect(session).toMatch(CANONICAL)
+
+			const hex = session.slice('ses_'.length, 'ses_'.length + 12)
+			// Our live clock must equal what upstream's encoder would emit for
+			// some clock inside the window the test just measured.
+			const inWindow = [...Array(after - before + 1).keys()].some(
+				(offset) => hex === upstreamTimeHex(true, before + offset, 1),
+			)
+			expect(inWindow).toBe(true)
+			expect(hex.slice(9, 12)).toBe('ffe')
+		}
+	})
+
+	test('the pre-fix digest prefix could never satisfy the counter check', () => {
+		// The exact pre-fix derivation, kept as a control so the regression
+		// cannot come back unnoticed: shape-valid, and still wrong.
+		const signal = '"hello"'
+		const sum = createHash('sha256').update('ses\x00' + signal).digest()
+		const digestHex = sum.subarray(0, 6).toString('hex')
+		expect(`ses_${digestHex}`).toMatch(/^ses_[0-9a-f]{12}/)
+
+		// If the 12 hex chars really were ~(clock * 0x1000 + counter), the low
+		// 12 bits must decode to a small per-millisecond counter. A digest
+		// decodes to an absurd one instead.
+		const asCounter = ~(BigInt(`0x${digestHex}`) & 0xfffn) & 0xfffn
+		expect(asCounter > 0x100n).toBe(true)
+
+		// And the fixed id always carries counter = 1.
+		const fixed = canonicalSessionID(signal).slice('ses_'.length, 'ses_'.length + 12)
+		expect((~(BigInt(`0x${fixed}`) & 0xfffn) & 0xfffn) === 1n).toBe(true)
+	})
+
+	test('a conversation minted earlier keeps its session across a clock tick', () => {
+		// The whole id is memoized per conversation: a retry, or a later turn,
+		// must reuse it, because upstream groups free-tier quota and prompt
+		// cache by session. Re-reading a live clock here would silently break
+		// both.
+		const signal = 'clock-tick-sensitivity-probe'
+		const before = canonicalSessionID(signal)
+		const clockAtFirstCall = invertedTimestampHex()
+		const end = Date.now() + 5
+		while (Date.now() < end) {
+			/* burn a few milliseconds so the clock really moves */
+		}
+		expect(invertedTimestampHex()).not.toBe(clockAtFirstCall)
+		expect(canonicalSessionID(signal)).toBe(before)
 	})
 })
 

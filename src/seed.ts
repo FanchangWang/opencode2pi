@@ -37,7 +37,12 @@ export const SEED_MODELS: readonly ProviderModelConfig[] = [
 		reasoning: true,
 		input: ['text', 'image'],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
+		// models.dev publishes 200000 here, but the MiMo model card and the
+		// official OpenCode CLI config both declare 1048576 (opencode2dsh
+		// 0.3.11 LOCAL_MODEL_OVERRIDES, issue #56 metadata note). The seed
+		// carries the corrected value; metadata.ts overrides the feed the
+		// same way on the discovery path.
+		contextWindow: 1_048_576,
 		maxTokens: 32_000,
 	},
 	{

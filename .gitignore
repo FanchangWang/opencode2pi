@@ -134,3 +134,7 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+
+# WorkBuddy local workspace data (agent memory, task state)
+.workbuddy/

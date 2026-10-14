@@ -31,6 +31,24 @@ import { UNAVAILABLE } from './seed.ts'
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 export const DEFAULT_MAX_TOKENS = 16_384
 
+/**
+ * models.dev fields this extension knowingly overrides, with the reason.
+ *
+ * `mimo-v2.6-flash-free` is the measured case: the feed declares
+ * `limit.context: 200000`, while the MiMo model card and the official OpenCode
+ * CLI config both use 1048576 (opencode2dsh 0.3.11 LOCAL_MODEL_OVERRIDES, issue
+ * #56 metadata note). Applied in {@link normalizeEntry}; once the feed itself
+ * publishes the corrected value the values match and the entry stops firing —
+ * it stays as a regression guard rather than being deleted. Every application
+ * is recorded in the notes so the override is never silent.
+ */
+const LOCAL_MODEL_OVERRIDES: Readonly<Record<string, { readonly contextWindow: number; readonly reason: string }>> = {
+	'mimo-v2.6-flash-free': {
+		contextWindow: 1_048_576,
+		reason: 'MiMo model card and official CLI config declare 1048576; models.dev publishes 200000',
+	},
+}
+
 /** Effort levels the host accepts; anything else is dropped rather than forwarded. */
 const KNOWN_EFFORTS: ReadonlySet<string> = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -128,7 +146,12 @@ export interface NormalizedModel {
 export function normalizeEntry(entry: ModelsDevEntry): NormalizedModel {
 	const notes: string[] = []
 
-	const contextWindow = readLimit(entry.limit?.context, 'limit.context', DEFAULT_CONTEXT_WINDOW, notes)
+	let contextWindow = readLimit(entry.limit?.context, 'limit.context', DEFAULT_CONTEXT_WINDOW, notes)
+	const override = LOCAL_MODEL_OVERRIDES[entry.id]
+	if (override !== undefined && override.contextWindow !== contextWindow) {
+		notes.push(`limit.context ${contextWindow} → ${override.contextWindow} (local override: ${override.reason})`)
+		contextWindow = override.contextWindow
+	}
 	const declaredMax = readLimit(entry.limit?.output, 'limit.output', DEFAULT_MAX_TOKENS, notes)
 	let maxTokens = declaredMax
 	if (maxTokens > contextWindow) {

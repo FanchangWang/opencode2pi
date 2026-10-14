@@ -19,7 +19,7 @@
 | # | 条件 | 违反时的报错 |
 | --- | --- | --- |
 | 1 | `Authorization: Bearer public`（字面量 `public`） | 401 |
-| 2 | 规范 session id：`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（12 hex + 14 base62 = 26 字符总长） | `MissingSessionID` / 403 |
+| 2 | 规范 session id：`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（12 hex + 14 base62 = 26 字符总长），**且 12 位 hex 是位取反真实时钟**（低 12 位解码为逐毫秒计数器，须落在 `[0, 63]`）——2026-10-13 起「形状正确」不再够用，详见 §2.3 | `MissingSessionID` / 403 |
 | 3 | **agent 形态 body**：`stream: true` **且** `tools` 里同时有 `bash` 和 `read` | 403 FreeTierError |
 
 条件 3 有**两个独立的部分**，只满足一半仍然403：
@@ -81,11 +81,14 @@ stream:true  + 无 tools            →  403 FreeTierError
 `exo-free` / `muse-spark-1.*` 甚至在 models.dev 上仍是 0 价，
 S1 与 S2 双重背书一个聊天层拒绝的 id —— 只有 denylist 挡得住。
 
-**mimo-v2.6-flash-free 的上下文窗口有分歧，本次不改**：models.dev 声明
-`limit.context: 200000`，opencode2dsh 用模型卡把它覆盖成 1048576
-（其 issue #17 报同一处不符，模型卡确写 1.05M）。我们实测能通但**测不出
-真实上限**，而两种错法的代价不对称：声明偏小只会提前压缩上下文（可恢复），
-声明偏大会让请求真的溢出（硬错误）。保守取 200000，等有实测再改。
+**mimo-v2.6-flash-free 的上下文窗口分歧，2026-10-14 改判采纳 1048576**：
+models.dev 声明 `limit.context: 200000`，opencode2dsh 用模型卡把它覆盖成
+1048576（其 issue #17 报同一处不符，模型卡确写 1.05M），官方 OpenCode CLI
+配置同样声明 1048576。2026-10-11 时我们因「实测能通但测不出真实上限、
+两种错法代价不对称（声明偏小只提前压缩上下文，可恢复；声明偏大让请求真的
+溢出，硬错误）」保守取 200000；本次同步上游 0.3.11 时经评审决定改为
+1048576（`seed.ts` 与 `metadata.ts` 的 `LOCAL_MODEL_OVERRIDES` 两处生效，
+后者带 note 落日志）。若后续实测发现上限确为 200000，改回只需动这两处。
 
 教训：**models.dev 的零定价元数据会滞后于下线**。`mimo-v2.5-free` 下线后
 models.dev 仍以 0 价发布，纯靠元数据判定会继续把死模型端上选择器 ——
@@ -95,6 +98,34 @@ denylist 的 id 拼写必须逐字来自 `/models`：`nemotron-3.ultra-free`（�
 曾长期挂在 `UNAVAILABLE` 里，而线上真实 id 是 `nemotron-3-ultra-free`（连字符），
 于是这条 denylist 一直是静默空转，401 的死模型照旧出现在选择器上。
 真实 id 本身也带点（`mimo-v2.6-flash-free`），所以拼写只能靠实测，不能靠肉眼推断。
+
+### 2.3 会话 id 的时钟半条（2026-10-13 上游变更 · 2026-10-14 本地复现）
+
+2026-10-13 上游给闸门第 2 条加了**第二个独立部分**：12 位十六进制不再是任意串，
+而是被解码回一段**位取反的墙钟**。opencode2dsh 当日 live probe
+（mimo-v2.6-flash-free 与 nemotron-3.5-lightning-free）结论：
+
+- 上游读这 12 位的**低 12 位**当作逐毫秒计数器，只接受 `[0, 63]`；
+  高 36 位时钟位根本不检查——解回 1970 年的 id 照样通过（其 issue #65
+  修正了最初「核对墙钟合理性」的误读）；
+- 摘要前缀落进该窗口的概率只有 ~1.5%，于是**几乎每个会话都 403，
+  而正则形状断言全绿**——测试钉的是「长得像」，上游查的是「是不是真的」。
+
+本仓库 2026-10-14 复现：修复前用 `gate.ts` 同形探针打 mimo-v2.6-flash-free，
+返回 `403 FreeTierError`（errors.ts 归类为 SHAPE_REJECTED），与上游结论一致。
+修复前 `canonicalSessionID()` 用 sha256 摘要填时间位，正是被拒的派生方式。
+
+修法（移植上游最终版）：时间位改由上游自己的生成器公式产出
+`~(Date.now() * 0x1000 + counter)`，counter 固定取 1（本扩展是自己会话的
+唯一写入者）——取反的结构性副产物是时间位以 `ffe` 结尾，这是字符串层面
+就能看出来的判据。会话身份只进 14 位 Base62 尾巴，不同会话不撞车、
+prompt cache 亲和保留；整个 id 按会话信号 memo（FIFO 1024），重试与多轮
+复用同一 id。真实 OpenCode 客户端传来的 `ses_` id 依旧原样透传。
+
+教训：**闸门条件会从「形状」升级到「派生方式」**。形状断言永远必要、但永远
+不充分——回归测试必须把上游编码器当 oracle 逐字节钉死
+（test/opencode2pi.test.ts「session clock」组），而不是在同一模块里重写
+一遍公式自证。
 
 ## 3. omp 扩展 API 的实测行为
 
