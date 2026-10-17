@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | 1 | `Authorization: Bearer public`（字面量 `public`） | 401 |
 | 2 | 规范 session id：`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（12 hex + 14 base62 = 26 字符总长），**且 12 位 hex 的布局要被校验**（低 12 位解码为逐毫秒计数器，须落在 `[1, 63]`，即线上 hex 低 12 位 ∈ `[0xFC0, 0xFFF]`）——2026-10-13 起「形状正确」不再够用，详见 §2.3/§2.4 | `MissingSessionID` / 403 |
-| 3 | **agent 形态 body**：`stream: true` **且** `tools` 里同时有 `shell` 和 `read`（**真实 OpenCode 定义**，stub 定义被 403），且请求打**匿名通道** `https://opencode.ai/inference/v1`——2026-10-14 起 keyless 通道离开 `/zen`，详见 §2.4 | 403 FreeTierError |
+| 3 | **agent 形态 body**：`stream: true` **且** `tools` 满足双通道形状之一（legacy `/zen/v1`：**单 `read` 工具**、定义不校验；`/inference`：`shell` 和 `read` **真实 OpenCode 定义**，stub 定义被 403）——2026-10-14 起 keyless 通道迁至 `/inference`，2026-10-17 恢复双通道，详见 §2.4/§2.5 | 403 FreeTierError |
 
 条件 3 有**两个独立的部分**，只满足一半仍然403：
 
@@ -157,6 +157,41 @@ prompt cache 亲和保留；整个 id 按会话信号 memo（FIFO 1024），重�
   填充/ascending）也被重编码而不是透传。§2.3 的 memo/真实时钟方案被此取代。
 - 教训：**闸门条件的组合会整体换代**——一个变量（endpoint、头、工具定义）
   变了就是全量 403，`doctor` 只测形状是不够的，必须用真实请求形状归因。
+
+### 2.5 上游恢复 legacy /zen/v1 双通道（2026-10-17 上游变更 · 本地实测）
+
+opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
+通道改回双端点：**优先 legacy `/zen/v1`（恢复 v1.3.7 请求形状，即单
+`read` 工具、定义不校验、`prj_` project、`opencode/1.18.31 (…)` UA、
+`x-opencode-request` 头）**，`/inference` 作为 fallback 保留 2.x 形状。
+
+2026-10-17 本仓库 `lane-probe`（已删）用四组形状实测，**全部 200**：
+
+| 组合 | URL | UA | project | tools | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| L1 legacy + v1.3.7 形状 | `/zen/v1` | `1.18.31` | `prj_*` | 单 read（stub 即可） | 200 |
+| I1 zen + 2.x 形状 | `/zen/v1` | `2.0.29` | 40-hex | shell/read 真实定义 | 200 |
+| I2 inference + 2.x 形状 | `/inference/v1` | `2.0.29` | 40-hex | shell/read 真实定义 | 200 |
+| L2 旧 bash stub | `/zen/v1` | `2.0.29` | 40-hex | bash stub（旧 v0.3.4 形状） | 200 |
+
+即闸门**又放宽了**：v0.3.5 的单通道形状仍然有效，但上游因此重启双通道，
+本仓库同步实现（获批三点合并：请求双通道、S1 发现双通道、doctor 双通道）。
+
+实现约束（实测）：
+
+- **`model.baseUrl` 与 `options.fetch` 均不生效**：注册期 URL 一旦固定，
+  运行期改不了（用「注册错误 URL + handler 覆盖」实测返回 404）。
+  fallback 只能靠「403 FreeTierError → `findHealthyLane()` 双通道探测 →
+  `setCurrentLane()` + 重新注册 provider」完成，60s 冷却（
+  `LANE_SWITCH_COOLDOWN_MS`）防振荡。
+- legacy 通道**只要求单 `read` 工具，定义不校验**；注入 stub 时不能
+  **重命名客户端已声明的 `read_file` 类工具**——那是宿主工具调度的名字，
+  重命名会破坏工具调度（与上游网关不同，它重命名的是 wire 层自己合成的）。
+  客户端已声明 `read` 就原样保留、不再注入 stub；声明了别的工具则追加 stub
+  且 `toolChoice: 'none'`（无工具可选时禁止宿主强制选工具）。
+- 会话头按通道不同：legacy 用 `x-opencode-request: req_<16 hex>`（无
+  `x-opencode-session-id`）；`/inference` 仍带 `x-opencode-session-id`（4 头
+  客户端指纹）。两通道 session id 的时钟半条要求相同（§2.3）。
 
 ## 3. omp 扩展 API 的实测行为
 

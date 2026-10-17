@@ -28,9 +28,8 @@ import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from './metadata.ts'
 import { SEED_MODELS, VERIFIED_FREE } from './seed.ts'
+import { LANE_ORDER, laneFor, type LaneKey } from './lanes.ts'
 
-/** The anonymous free lane moved off /zen onto its own host on 2026-10-14 (opencode2api v1.3.9). */
-const ANONYMOUS_BASE = 'https://opencode.ai/inference/v1'
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const MODELS_DEV_PROVIDER = 'opencode'
 const ANONYMOUS_KEY = 'public'
@@ -151,23 +150,33 @@ export function loadMetadata(): Promise<MetadataOutcome> {
 	return metadataInflight
 }
 
-/** Live catalogue straight from the anonymous lane: the authority on what exists right now. */
-async function fetchLiveModelIds(): Promise<string[]> {
-	const response = await fetch(`${ANONYMOUS_BASE}/models`, {
-		signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-		headers: { accept: 'application/json', authorization: `Bearer ${'public'}` },
-	})
-	if (!response.ok) throw new Error(`HTTP ${response.status}`)
-	const payload: unknown = await response.json()
-	if (typeof payload !== 'object' || payload === null) throw new Error('unexpected /models shape')
-	if (!('data' in payload) || !Array.isArray(payload.data)) throw new Error('missing data[]')
-	const ids: string[] = []
-	for (const item of payload.data) {
-		if (typeof item === 'object' && item !== null && 'id' in item && typeof item.id === 'string') {
-			ids.push(item.id)
+/** Live catalogue straight from the anonymous lanes: the authority on what exists right now. */
+async function fetchLiveModelIds(): Promise<{ ids: string[]; lane: LaneKey }> {
+	// Try the lanes in preference order (legacy /zen/v1 first, /inference as
+	// fallback, FINDINGS §2.5); the first lane with a valid listing wins.
+	let lastError: unknown
+	for (const lane of LANE_ORDER) {
+		try {
+			const response = await fetch(`${laneFor(lane).baseUrl}/models`, {
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+				headers: { accept: 'application/json', authorization: `Bearer ${'public'}` },
+			})
+			if (!response.ok) throw new Error(`HTTP ${response.status}`)
+			const payload: unknown = await response.json()
+			if (typeof payload !== 'object' || payload === null) throw new Error('unexpected /models shape')
+			if (!('data' in payload) || !Array.isArray(payload.data)) throw new Error('missing data[]')
+			const ids: string[] = []
+			for (const item of payload.data) {
+				if (typeof item === 'object' && item !== null && 'id' in item && typeof item.id === 'string') {
+					ids.push(item.id)
+				}
+			}
+			return { ids, lane }
+		} catch (error) {
+			lastError = error
 		}
 	}
-	return ids
+	throw lastError instanceof Error ? lastError : new Error('all lanes failed')
 }
 
 export interface DiscoveryResult {
@@ -202,8 +211,8 @@ export async function discoverFreeModels(): Promise<DiscoveryResult> {
 	for (const entry of metadata.entries) byId.set(entry.id, entry)
 
 	// S3: the seed is always a candidate, so a Zen outage cannot empty the list.
-	const candidates = live ?? SEED_MODELS.map((model) => model.id)
-	if (live) diagnostics.push(`S1 anonymous /models: ${live.length} ids live`)
+	const candidates = live ? live.ids : SEED_MODELS.map((model) => model.id)
+	if (live) diagnostics.push(`S1 anonymous /models (${live.lane} lane): ${live.ids.length} ids live`)
 
 	const models: ProviderModelConfig[] = []
 	const seen = new Set<string>()

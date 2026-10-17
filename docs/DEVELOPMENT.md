@@ -14,25 +14,34 @@ Zen 的匿名通道不靠凭据鉴权，而是**请求形状校验**。三个条
 | --- | --- | --- |
 | 1 | `Authorization: Bearer public`（字面量） | 401 |
 | 2 | 规范 session id `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`，且 12 位 hex 布局须被校验（低 12 位解码为逐毫秒计数器 ∈ `[1, 63]`，见下） | `MissingSessionID` / 403 |
-| 3 | agent 形态 body：`stream: true` **且** `tools` 同时含 `shell` 和 `read`（**真实 OpenCode 定义**，stub 被 403），且请求打匿名通道 `https://opencode.ai/inference/v1` | 403 FreeTierError |
+| 3 | agent 形态 body：`stream: true` **且** `tools` 满足双通道形状之一 —— legacy `/zen/v1`：**单 `read` 工具**（定义不校验）；`/inference`：同时含 `shell` 和 `read`（**真实 OpenCode 定义**，stub 被 403） | 403 FreeTierError |
 
 条件 3 有**两个独立部分**，只满足一半照样 403：
 
 ```
-stream:true  + tools:[shell,read]  →  200 ✅
-stream:false + tools:[shell,read]  →  403
-stream:true  + 无 tools            →  403
+stream:true  + 双通道任一工具形状  →  200 ✅
+stream:false + 工具形状正确         →  403
+stream:true  + 无 tools             →  403
 ```
 
 条件 2 的 hex 段带**布局校验**（上游 2026-10-13 新增，opencode2dsh #62/#65；
 2026-10-15 起改用确定性重编码，opencode2api #70）：低 12 位解码为逐毫秒
 计数器、只接受 `[1, 63]`（线上 hex 低 12 位 ∈ `[0xFC0, 0xFFF]`）。铸 id 的
 逻辑在 `src/session.ts`（`descendingTimePart`），机制与矩阵见 FINDINGS
-§2.3/§2.4。2026-10-14 起匿名通道迁至 `/inference`、工具名 `bash` → `shell`
-且校验定义（stub 403），见 FINDINGS §2.4。
+§2.3/§2.4。
 
-完整模型矩阵见 [`FINDINGS.md`](FINDINGS.md) §2。**注意 `RegionError`（地区封锁）
-和 `FreeTierError`（形状闸门）是两回事**，错误分类必须分开。
+2026-10-14 起匿名通道迁至 `/inference`、工具名 `bash` → `shell` 且校验定义
+（stub 403），见 FINDINGS §2.4；**2026-10-17 上游恢复双通道**（opencode2api
+v1.4.1）：优先 legacy `/zen/v1`（v1.3.7 形状：单 read 工具、`prj_` project、
+`opencode/1.18.31` UA、`x-opencode-request` 头），`/inference` 作 fallback
+（2.x 形状，4 会话头）。双通道形状中心在 `src/lanes.ts`：当前 lane 状态
+（`currentLane`/`setCurrentLane`）也在那里，health 探针与真实路径共用；
+请求 403 → `findHealthyLane()` 双通道探测 → 重注册（60s 冷却），因为
+`model.baseUrl` / `options.fetch` 在注册期后就不可改（FINDINGS §2.5）。
+`src/gate.ts` 的 `sendGateProbe(modelId, lane)` 按 lane 发同形探针，`doctor`
+与健康探测共用同一份。完整模型矩阵见 [`FINDINGS.md`](FINDINGS.md) §2。
+**注意 `RegionError`（地区封锁）和 `FreeTierError`（形状闸门）是两回事**，
+错误分类必须分开。
 
 ---
 
@@ -87,7 +96,8 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 | `src/discovery.ts` | 三级发现阶梯、并发、15s 预算、落盘缓存 |
 | `src/session.ts` | 按会话派生 session id |
 | `src/errors.ts` | 上游失败分类 |
-| `src/gate.ts` | **共享**的闸门形状请求（doctor 与健康探测共用同一份） |
+| `src/gate.ts` | **共享**的闸门形状请求（doctor 与健康探测共用同一份）+ `findHealthyLane` 双通道选择 |
+| `src/lanes.ts` | 双通道形状中心：legacy `/zen/v1` 与 `/inference` 的 headers/sessionHeaders/gateTools，当前 lane 状态 |
 | `src/doctor.ts` | 闸门自检 |
 | `src/health.ts` | 逐模型探测、判定规则、落盘缓存 |
 | `src/filters.ts` | 用户选择的隐藏规则、落盘与派生隐藏集 |

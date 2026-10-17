@@ -27,6 +27,7 @@ import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
 import { sendGateProbe } from './gate.ts'
+import { currentLane } from './lanes.ts'
 
 /**
  * Probe pacing.
@@ -144,7 +145,10 @@ export interface ProbeResult extends HealthRecord {
 }
 
 async function probeModel(modelId: string): Promise<ProbeResult> {
-	const probe = await sendGateProbe(modelId)
+	// Mirror the real request path: probe the lane the provider is currently
+	// registered against (lanes.ts currentLane), so a verdict reflects what a
+	// real request would hit right now.
+	const probe = await sendGateProbe(modelId, currentLane())
 	const base = { modelId, checkedAt: Date.now(), terminalFailures: 0, transientFailures: 0, latencyMs: probe.latencyMs }
 
 	if (probe.ok) {

@@ -27,6 +27,7 @@ import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry
 import { canonicalSessionID, clientProjectID, descendingTimePart, PROCESS_SESSION, sessionForRequest, sessionHeaders } from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
 import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from '../src/tools.ts'
+import { LANES } from '../src/lanes.ts'
 
 const CANONICAL = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 
@@ -302,6 +303,59 @@ describe('gate tools (definition check, 2026-10-15)', () => {
 		expect(OPENCODE_TOOLS.shell).toBeDefined()
 		expect(OPENCODE_TOOLS.read).toBeDefined()
 		expect(OPENCODE_TOOLS.bash).toBeUndefined()
+	})
+})
+
+describe('anonymous lanes (dual-channel, 2026-10-17)', () => {
+	test('legacy lane injects a single read stub when none is declared', () => {
+		const { tools, toolChoice } = LANES.legacy.gateTools([])
+		expect(tools).toHaveLength(1)
+		expect(tools[0]?.name).toBe('read')
+		expect(toolChoice).toBe('none')
+	})
+
+	test('legacy lane keeps a declared read tool untouched', () => {
+		// /zen/v1 does not validate definitions, so a real client "read" passes
+		// as-is and no stub is added.
+		const declared = [{ name: 'read', description: 'real client read' }]
+		const { tools, toolChoice } = LANES.legacy.gateTools(declared)
+		expect(tools).toHaveLength(1)
+		expect(tools[0]?.description).toBe('real client read')
+		expect(toolChoice).toBeUndefined()
+	})
+
+	test('legacy lane appends a read stub alongside unknown tools', () => {
+		const declared = [{ name: 'edit', description: 'edit tool' }]
+		const { tools, toolChoice } = LANES.legacy.gateTools(declared)
+		expect(tools.map((tool) => tool.name)).toEqual(['edit', 'read'])
+		expect(toolChoice).toBeUndefined()
+	})
+
+	test('inference lane upgrades known tools to genuine definitions', () => {
+		const declared = [{ name: 'shell', description: 'stub', parameters: { type: 'object', properties: {} } }]
+		const { tools, toolChoice } = LANES.inference.gateTools(declared)
+		expect(tools.map((tool) => tool.name)).toEqual(['shell', 'read'])
+		expect(tools[0]?.description).not.toContain('stub')
+		expect(toolChoice).toBeUndefined()
+	})
+
+	test('lane headers differ per origin', () => {
+		const legacy = LANES.legacy.headers('omp:default-project')
+		expect(legacy['x-opencode-project']).toMatch(/^prj_[0-9a-f]{24}$/)
+		expect(legacy['user-agent']).toMatch(/^opencode\/1\.18\.31/)
+		const inference = LANES.inference.headers('omp:default-project')
+		expect(inference['x-opencode-project']).toMatch(/^[0-9a-f]{40}$/)
+		expect(inference['user-agent']).toBe('opencode/latest/2.0.29/cli')
+	})
+
+	test('legacy session headers omit x-opencode-session-id and carry x-opencode-request', () => {
+		const session = 'ses_123456789ffeABCDEFGHIJKLMN'
+		const legacy = LANES.legacy.sessionHeaders(session)
+		expect(legacy['x-opencode-session-id']).toBeUndefined()
+		expect(legacy['x-opencode-request']).toMatch(/^req_[0-9a-f]{16}$/)
+		const inference = LANES.inference.sessionHeaders(session)
+		expect(inference['x-opencode-session-id']).toBe(session)
+		expect(inference['x-opencode-request']).toBeUndefined()
 	})
 })
 

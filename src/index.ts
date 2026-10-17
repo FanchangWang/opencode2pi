@@ -3,18 +3,25 @@
  *
  * The built-in `opencode-zen` provider requires a paid `OPENCODE_API_KEY`.
  * This extension needs none: the upstream gate is a request-shape check, not
- * a credential check. Three conditions, all confirmed live on 2026-10-15:
+ * a credential check. The keyless lane is served on TWO origins with
+ * DIFFERENT shapes (confirmed live 2026-10-17, docs/FINDINGS.md §2.4/§2.5):
  *
  *   1. `Authorization: Bearer public`  (anonymous credential)
  *   2. canonical session id  `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` with a
  *      validated counter layout (low 12 bits decode to a counter in [1, 63])
- *   3. an agent-shaped body: `tools` containing `shell` and `read` with the
- *      genuine OpenCode definitions (stubs are rejected), sent to the
- *      anonymous inference endpoint (https://opencode.ai/inference/v1)
+ *   3. an agent-shaped body: on the legacy /zen/v1 origin a single "read"
+ *      tool (definitions not checked); on /inference, `shell` + `read` with
+ *      the GENUINE OpenCode definitions (stubs are rejected)
  *
  * Non-streaming requests are rejected with FreeTierError. Host streaming is
  * inherent to the openai-completions engine, so condition 3 is the only body
  * change this extension has to make.
+ *
+ * The host resolves the request URL from the provider registration and
+ * neither `model.baseUrl` nor `options.fetch` can redirect it (both probed
+ * 2026-10-17), so lane preference is registration-level: the legacy /zen/v1
+ * lane is registered first, and a shape rejection re-probes both lanes and
+ * re-registers against the healthy one.
  *
  * Integration seam (verified against omp 18.6.1 — see docs/FINDINGS.md):
  *   - `pi.registerProvider` config accepts `onPayload` / `prepareRequest`
@@ -36,64 +43,48 @@ import { handleCommand } from './commands.ts'
 import { classifyUpstreamFailure, formatFailure } from './errors.ts'
 import { hidden, loadFilters, onHiddenChange, publishFilters, publishHealth } from './filters.ts'
 import { loadHealth } from './health.ts'
-import { clientProjectID, PROCESS_SESSION, sessionForRequest, sessionHeaders } from './session.ts'
+import { laneFor, type LaneKey } from './lanes.ts'
+import { findHealthyLane } from './gate.ts'
+import { currentLane, setCurrentLane } from './lanes.ts'
+import { PROCESS_SESSION, sessionForRequest } from './session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
-import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from './tools.ts'
 
 const PROVIDER = 'opencode-zen-free'
 const API_ID = 'openai-completions-zen-free'
-/** The anonymous free lane lives on its own host since 2026-10-14 (opencode2api v1.3.9); /zen no longer accepts it. */
-const ANONYMOUS_BASE = 'https://opencode.ai/inference/v1'
 const ANONYMOUS_KEY = 'public'
 const SOURCE_ID = 'opencode2pi'
 
-const PROJECT_ID = clientProjectID('omp:default-project')
+/** Project signal rendered into each lane's header shape (FINDINGS §2.5). */
+const PROJECT_ID = 'omp:default-project'
 
-const DISGUISE_HEADERS: Record<string, string> = {
-	'user-agent': 'opencode/latest/2.0.29/cli',
-	'x-opencode-client': 'cli',
-	'x-opencode-project': PROJECT_ID,
+/** The lane the provider is currently registered against (shared in lanes.ts). */
+let reapply: (() => void) | undefined
+let lastLaneSwitchAt = 0
+const LANE_SWITCH_COOLDOWN_MS = 60_000
+
+/** Re-register the provider against the lane currently believed healthy. */
+function republish(): void {
+	reapply?.()
 }
 
-const GATE_TOOLS = GATE_TOOL_NAMES.map((name) => gateTool(name))
-
 /**
- * Ensure the gate tools are present and genuine.
- *
- * The free tier validates the DEFINITION of every tool whose name it
- * recognises (opencode2api #83): a synthesised stub — even one carrying the
- * right name — is rejected with 403 FreeTierError. So any declared tool with a
- * known OpenCode name is replaced with the genuine definition, and missing
- * `shell`/`read` are appended. Tools whose names upstream does not recognise
- * are left exactly as the host declared them, so the host's tool dispatch
- * keeps working. When a caller runs with no tools at all (a bare completion),
- * the injected tools arrive with `toolChoice: 'none'` to stop the model from
- * calling a tool the host cannot service.
+ * A shape rejection (403 FreeTierError) means the registered lane may have
+ * stopped accepting our shape. Re-probe both lanes and re-register against the
+ * healthy one so the NEXT request takes the fallback. Cooldown prevents
+ * oscillation when the upstream is flaky.
  */
-function withGateTools(
-	context: Context,
-	options: SimpleStreamOptions,
-): { context: Context; options: SimpleStreamOptions } {
-	const existing = context.tools ?? []
-
-	const upgraded = existing.map((tool) => {
-		const definition = OPENCODE_TOOLS[tool.name]
-		if (!definition) return tool
-		return { ...tool, description: definition.description, parameters: definition.parameters as Record<string, unknown> }
-	})
-
-	const names = new Set(upgraded.map((tool) => tool.name))
-	const missing = GATE_TOOLS.filter((tool) => !names.has(tool.name))
-
-	if (missing.length === 0 && upgraded.every((tool, index) => tool === existing[index])) {
-		return { context, options }
-	}
-	const tools = [...upgraded, ...missing]
-
-	if (existing.length === 0 && missing.length > 0) {
-		return { context: { ...context, tools }, options: { ...options, toolChoice: 'none' } }
-	}
-	return { context: { ...context, tools }, options }
+function scheduleLaneSwitch(): void {
+	const now = Date.now()
+	if (now - lastLaneSwitchAt < LANE_SWITCH_COOLDOWN_MS) return
+	lastLaneSwitchAt = now
+	void (async () => {
+		const next = await findHealthyLane()
+		if (next !== null && next !== currentLane()) {
+			setCurrentLane(next)
+			log?.warn(`[${PROVIDER}] switching anonymous lane to ${next}`)
+			republish()
+		}
+	})()
 }
 
 /**
@@ -124,7 +115,13 @@ let warnedMissingSession = false
  */
 registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStreamOptions) => {
 	const incoming = options ?? {}
-	const gated = withGateTools(context, incoming)
+	const lane = laneFor(currentLane())
+
+	const gated = lane.gateTools(context.tools ?? [])
+	// HostTool carries the same wire fields the host's own Tool objects do;
+	// the host Context type is generic over the schema, so bridge it here.
+	const gatedContext = { ...context, tools: gated.tools as Context['tools'] }
+	const forwarded: SimpleStreamOptions = gated.toolChoice ? { ...incoming, toolChoice: gated.toolChoice } : incoming
 
 	const session = sessionForRequest(options)
 	if (!session.derived && !warnedMissingSession) {
@@ -142,28 +139,36 @@ registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStrea
 	const builtin: Model = {
 		...model,
 		api: 'openai-completions' as Model['api'],
-		headers: { ...model.headers, ...sessionHeaders(session.id) },
+		headers: { ...model.headers, ...lane.sessionHeaders(session.id) },
 	}
-	const forwarded = gated.options
 
-	const upstream = streamSimple(builtin, gated.context, forwarded)
+	const upstream = streamSimple(builtin, gatedContext, forwarded)
 
 	// Failures arrive as a stream *event*, not a rejected promise, so
 	// classification means forwarding the stream and rewriting that event.
 	const relayed = createAssistantMessageEventStream()
+	let sawShapeRejection = false
 	void (async () => {
 		try {
 			for await (const event of upstream) {
-				relayed.push(
-					event.type === 'error'
-						? { ...event, error: explainFailure(model.id, event.error) }
-						: event,
-				)
+				if (event.type === 'error') {
+					if (classifyUpstreamFailure(event.error.errorStatus, event.error.errorMessage ?? '').kind === 'SHAPE_REJECTED') {
+						sawShapeRejection = true
+					}
+					relayed.push(
+						{ ...event, error: explainFailure(model.id, event.error) },
+					)
+				} else {
+					relayed.push(event)
+				}
 			}
 			relayed.end(await upstream.result())
 		} catch (error) {
 			relayed.fail(error)
 		}
+		// Only after the stream has been forwarded: the current request is
+		// already answered with the rejection; the switch helps the NEXT one.
+		if (sawShapeRejection) scheduleLaneSwitch()
 	})()
 	return relayed
 }, SOURCE_ID)
@@ -200,12 +205,13 @@ function applyProvider(pi: ExtensionAPI): void {
 		log?.warn(`[${PROVIDER}] 过滤规则隐藏了全部模型，模型列表不会缩小；用 /opencode2pi filter 放宽`)
 	}
 
+	const lane = laneFor(currentLane())
 	pi.registerProvider(PROVIDER, {
-		baseUrl: ANONYMOUS_BASE,
+		baseUrl: lane.baseUrl,
 		api: API_ID,
 		apiKey: ANONYMOUS_KEY,
 		authHeader: true,
-		headers: DISGUISE_HEADERS,
+		headers: lane.headers(PROJECT_ID),
 		models: [...models],
 	})
 }
@@ -221,12 +227,13 @@ async function refreshCatalog(pi: ExtensionAPI): Promise<void> {
 
 export default async function (pi: ExtensionAPI): Promise<void> {
 	log = pi.logger
+	reapply = () => applyProvider(pi)
 
 	// The stored choices are part of what the roster is, so they are adopted
 	// before the first registration rather than applied on the next probe.
 	publishFilters(await loadFilters())
 	publishHealth(await loadHealth())
-	onHiddenChange(() => applyProvider(pi))
+	onHiddenChange(() => reapply?.())
 	applyProvider(pi)
 
 	// The host awaits extension factories and only then drains the registration
@@ -252,7 +259,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 export {
 	explainFailure,
-	withGateTools,
 	PROVIDER,
 	API_ID,
 	SOURCE_ID,

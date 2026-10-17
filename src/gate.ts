@@ -2,19 +2,23 @@
  * The gate-shaped request, in one place.
  *
  * Both `doctor` and the per-model health probe need to put a minimal
- * agent-shaped request in front of Zen, and they must send *exactly* the same
- * bytes: if the two drifted, `doctor` could report a healthy gate that the real
- * path no longer satisfies, which is the one failure this code exists to catch.
+ * agent-shaped request in front of the anonymous free tier, and they must send
+ * *exactly* the same bytes as the real path: if they drifted, `doctor` could
+ * report a healthy gate that the real path no longer satisfies, which is the
+ * one failure this code exists to catch.
  *
- * The shape is not negotiable (docs/FINDINGS.md §2). All three conditions are
- * load-bearing, and the third has two independent halves — a non-streaming
- * request is rejected even with both tools present.
+ * Since 2026-10-17 the keyless lane is served on two origins with different
+ * shapes (docs/FINDINGS.md §2.4/§2.5): the legacy /zen/v1 origin takes the
+ * pre-2.x shape (single "read" tool, definitions not checked) and is probed
+ * first; /inference takes the 2.x shape (genuine shell/read definitions) as
+ * the fallback. The shapes are not negotiable — all conditions are load-
+ * bearing, and the third has two independent halves — a non-streaming request
+ * is rejected even with the required tools present.
  */
 
-import { canonicalSessionID, clientProjectID, sessionHeaders } from './session.ts'
-import { OPENCODE_TOOLS } from './tools.ts'
+import { canonicalSessionID } from './session.ts'
+import { LANES, laneFor, LANE_ORDER, type LaneKey } from './lanes.ts'
 
-const ANONYMOUS_BASE = 'https://opencode.ai/inference/v1'
 const ANONYMOUS_KEY = 'public'
 const GATE_TIMEOUT_MS = 30_000
 
@@ -27,33 +31,21 @@ export interface GateProbe {
 	readonly transportError?: string
 }
 
-/**
- * The agent-shaped tool set the gate requires, with the genuine OpenCode
- * definitions: the free tier validates the DEFINITION of every tool whose name
- * it recognises, and a synthesised stub is rejected with 403 FreeTierError
- * (opencode2api #83).
- */
-function gateTools() {
-	return (['shell', 'read'] as const).map((name) => {
-		const definition = OPENCODE_TOOLS[name]
-		if (definition === undefined) {
-			// A missing definition would silently ship a stub-shaped request,
-			// which upstream rejects — fail loudly instead.
-			throw new Error(`missing gate tool definition: ${name}`)
-		}
-		return {
-			type: 'function' as const,
-			function: {
-				name,
-				description: definition.description,
-				parameters: definition.parameters as Record<string, unknown>,
-			},
-		}
-	})
+/** OpenAI wire shape for the gate tools of one lane. */
+function gateTools(lane: LaneKey) {
+	const { tools } = LANES[lane].gateTools([])
+	return tools.map((tool) => ({
+		type: 'function' as const,
+		function: {
+			name: tool.name,
+			description: tool.description ?? '',
+			parameters: (tool.parameters ?? { type: 'object', properties: {} }) as Record<string, unknown>,
+		},
+	}))
 }
 
 
-/** The three gate conditions, restated so a failing `doctor` is actionable. */
+/** The gate conditions, restated so a failing `doctor` is actionable. */
 export const GATE_CONDITIONS: readonly string[] = [
 	'Authorization: Bearer public',
 	// Shape alone stopped being sufficient on 2026-10-13: the free tier reads
@@ -61,39 +53,39 @@ export const GATE_CONDITIONS: readonly string[] = [
 	// counter and accepts only [1, 63] (docs/FINDINGS.md §2.3, issue #62;
 	// layout validated by session.ts DESCENDING_TIME_PART).
 	'canonical session id  ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$  with counter layout in [1, 63]',
-	'agent-shaped body: stream:true and tools containing shell and read with genuine definitions, sent to https://opencode.ai/inference/v1',
+	'agent-shaped body: stream:true; on legacy /zen/v1 a single "read" tool (definitions not checked), on /inference genuine shell+read definitions',
 ]
 /**
- * Send one minimal gate-shaped streaming request and report what came back.
+ * Send one minimal gate-shaped streaming request down one lane and report what
+ * came back.
  *
  * On success the stream is cancelled rather than drained: reaching a 200 *is*
  * the verdict, and reading a completion would spend tokens to learn nothing new.
  * The session id is derived per call so repeated probes do not share upstream
  * cache affinity.
  */
-export async function sendGateProbe(modelId: string): Promise<GateProbe> {
+export async function sendGateProbe(modelId: string, lane: LaneKey): Promise<GateProbe> {
 	const startedAt = Date.now()
-	const session = canonicalSessionID(`opencode2pi:gate:${modelId}:${startedAt}`)
+	const session = canonicalSessionID(`opencode2pi:gate:${modelId}:${startedAt}:${lane}`)
+	const shape = laneFor(lane)
 
 	let response: Response
 	try {
-		response = await fetch(`${ANONYMOUS_BASE}/chat/completions`, {
+		response = await fetch(`${shape.baseUrl}/chat/completions`, {
 			method: 'POST',
 			headers: {
-				'user-agent': 'opencode/latest/2.0.29/cli',
-				'x-opencode-client': 'cli',
-				'x-opencode-project': clientProjectID('opencode2pi:default-project'),
+				...shape.headers('opencode2pi:default-project'),
+				...shape.sessionHeaders(session),
 				authorization: `Bearer ${ANONYMOUS_KEY}`,
 				'content-type': 'application/json',
 				accept: 'application/json, text/event-stream',
-				...sessionHeaders(session),
 			},
 			body: JSON.stringify({
 				model: modelId,
 				stream: true,
 				max_tokens: 16,
 				messages: [{ role: 'user', content: 'Reply with OK.' }],
-				tools: gateTools(),
+				tools: gateTools(lane),
 			}),
 			signal: AbortSignal.timeout(GATE_TIMEOUT_MS),
 		})
@@ -109,4 +101,17 @@ export async function sendGateProbe(modelId: string): Promise<GateProbe> {
 
 	const body = await response.text().catch(() => '')
 	return { ok: false, status: response.status, body, latencyMs }
+}
+
+/**
+ * Probe both lanes in preference order and return the first that accepts the
+ * gate shape, or null when neither does. This is the lane-selection probe the
+ * provider re-registration uses after a shape rejection.
+ */
+export async function findHealthyLane(modelId = 'mimo-v2.6-flash-free'): Promise<LaneKey | null> {
+	for (const lane of LANE_ORDER) {
+		const probe = await sendGateProbe(modelId, lane)
+		if (probe.ok) return lane
+	}
+	return null
 }
