@@ -101,7 +101,13 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 | `src/doctor.ts` | 闸门自检 |
 | `src/health.ts` | 逐模型探测、判定规则、落盘缓存 |
 | `src/filters.ts` | 用户选择的隐藏规则、落盘与派生隐藏集 |
-| `src/commands.ts` | `/opencode2pi` 四条命令（doctor/status/probe/filter）与 TUI |
+| `src/store.ts` | 数据目录与读写：四处散落的 `tmpdir()` 拼接集中在这里；`OPENCODE2PI_DATA_DIR` 覆盖（测试用） |
+| `src/exits.ts` | `exits.txt` 的文法：解析/拒绝原因/写回/凭据脱敏 |
+| `src/sources.ts` | 内置免费代理源（HTTP 子集）与地址行解析 |
+| `src/pool.ts` | 出口池状态：开关、选中出口、证据落盘、`poolFetch` 包装器、被动标记 |
+| `src/pool-probe.ts` | 屏检（cloudflare trace + 3s 门槛 + S/A/B/C 分级）与闸门探测、内置源补充 |
+| `src/pool-cmd.ts` | `/opencode2pi pool` 的 TUI 与菜单 |
+| `src/commands.ts` | `/opencode2pi` 五条命令（doctor/status/probe/filter/pool）与 TUI |
 
 > `gate.ts` 单独存在是有原因的：如果 doctor 和健康探测各写一份形状，两者一旦漂移，
 > doctor 会报「闸门正常」而真实路径已经失效 —— 那正是这段代码唯一要抓的故障。
@@ -196,6 +202,50 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 所以 `saveHealth` 按**调用方看到的整个 roster** 剪枝，不是按这批结果 ——
 否则会把它刚刚拒绝重跑的那些结论删掉。
 
+### 4.7 出口池：能换、但只手动换
+
+**为什么需要它**：匿名额度按 **出口 IP × 模型** 记账。同一个出口上换模型通常还有额度
+（§4.4.1 实测），同一个模型换出口能不能继续，只有实测才知道 —— 这正是闸门探测要问的
+问题（`gate.ts` 的同一份形状、同一个 `init.proxy`）。宿主的 `PI_PROXY*` 在进程生命周期
+内被 memo（`utils/proxy.ts:129-151`），所以「换出口」不可能靠环境变量，只能靠
+`options.fetch` + `init.proxy`（`FINDINGS.md` §2.6 实测三连）。
+
+**为什么不做自动轮换**：宿主对传输层失败会重试（实测 120s 内 28 次，§2.6），在这一层再
+加一次「失败就换」等于把量级乘起来，而匿名通道正是靠请求量记账的。所以真实请求失败时
+只做一件事：在**它经过的那个出口**上按模型记一笔（`recordPassive`），下次打开 `pool`
+能看到实际发生了什么。换不换由用户点。opencode2dsh 的自动轮换是另一套设计，不要抄。
+
+**关掉就是没装过**：`poolFetch()` 在池关闭时返回 `undefined`，调用方于是**不往 options 里
+加 `fetch` 键**（`index.ts`），宿主行为（含 `PI_PROXY`）原样保留。这是返回值上的性质，
+不是文档里的承诺 —— `test/pool.test.ts` 就钉在这一点上。
+
+**两种测量，成本不同，所以分开**：
+
+| 测量 | 请求形状 | 配额 | 判定 |
+| --- | --- | --- | --- |
+| 屏检 | `GET https://cloudflare.com/cdn-cgi/trace`，走候选出口 | 0 | 通/不通、出口 IP、地区、延迟分级（>3s 不可用） |
+| 闸门探测 | `gate.ts` 的最小形状请求，走候选出口 | 少量 | 上游接不接受这个出口（`verdictOf`） |
+
+**什么算「这个出口坏了」**：只有 `region` / `transport` / `shape` 会证伪出口。
+429 是**按模型**的（§4.4.1），400 是模型拒绝内容，5xx 是上游——判成 `inconclusive`，
+不动出口（`verdictOf` 的注释写了每一条的理由）。
+
+**「可用」的判据是两种证据之一**（`isUsable`）：闸门 200（更强的证据），或屏检在时限内
+通过且延迟 ≤3s。所以批量屏检出的出口不必再逐个烧配额去确认；而只做过闸门探测、没做过
+屏检的出口也算可用 —— 一次真实请求成功比一次 trace 成功更能说明问题。
+
+**屏检失败只是记账，不删出口**：超时、连不上、延迟 >3s 的出口都留在列表里，行内写着原因，
+只是不计入「可用」——用户看到的是一份现状，不是一份被清理过的好消息。
+
+**凭据只留在一个地方**：手动出口的 URL 在 `exits.txt`，`pool.json` 里只有
+`sha256(url)[:12]`。`recordScreen`/`recordGate` 对这些出口是「第一次测量时按候选补一条
+证据」（`ensureEvidence`），而不是把 URL 抄进 store。测试 `pool.json holds no credentials`
+钉住这条。
+
+**内置免费出口是兜底，不是首选**：它们在公开列表里、是第三方代理、几小时内就会烂掉，
+所以：只在用户点「补充内置免费出口」时拉取；屏检通过才入池；上限 12 个、满了按
+可用性与延迟淘汰；TUI 里与手动出口分开标注 `手动` / `内置`。
+
 ---
 
 ## 5. 验证
@@ -218,8 +268,28 @@ bun test
 
 **如果对话返回 403，先查本文 §1 的三个条件**，不要改别的地方。
 
-`/opencode2pi doctor`、`probe` 与 `filter` 需要交互式 TUI；打印模式下 `status`
-照常打印已有结论并点名哪些模型没探测过，`probe` 直接提示不可用。
+`/opencode2pi doctor`、`probe`、`filter` 与 `pool` 需要交互式 TUI；打印模式下 `status`
+照常打印已有结论并点名哪些模型没探测过，`probe` 提示不可用，`pool` 打印出口列表
+（只读）。
+
+出口池的接线要在**真实进程**里证明，因为「wrapper 装上了」这件事静态看不出来。
+用 `OPENCODE2PI_DATA_DIR` 指一个临时目录，不碰用户的真实 `pool.json`：
+
+```sh
+# 池关闭：请求按原样发出（也证明关掉就是没装过）
+omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
+
+# 池开启 + 死端口出口：必须失败（ECONNREFUSED / transport），成功即说明 wrapper 没接上
+export OPENCODE2PI_DATA_DIR=/tmp/o2pi-smoke-dead   # exits.txt: http://127.0.0.1:9, pool.json: enabled
+omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
+
+# 池开启 + 可用出口：必须成功（走代理也能过闸门）
+export OPENCODE2PI_DATA_DIR=/tmp/o2pi-smoke-live   # exits.txt: http://192.168.31.50:7890
+omp -e ./src/index.ts -p --model opencode-zen-free/mimo-v2.6-flash-free "Reply with exactly OK"
+```
+
+写这两个临时目录用扩展自己的代码路径最保真（`loadPool` → `addCandidate` →
+`selectExit` → `setPoolEnabled`），不要手写 `pool.json`。
 
 ---
 
@@ -399,5 +469,7 @@ provenance 徽章。
 - ❌ 不要引入 `createProvider` / `openaiCompletions`（宿主 1.x 里没有这两个导出）
 - ❌ 不要返回嵌套 `limits`（静默失效）
 - ❌ 不要只给 `fetchDynamicModels` 不给静态种子（冷启动失败）
-- ❌ 不要 spawn 子进程，不要移植 IP 池（宿主代理是进程内缓存，运行时改环境变量不生效）
-- ❌ 不要照抄 opencode2dsh 的重试策略（匿名通道重试轰炸会挤掉自己的配额）
+- ❌ 不要 spawn 子进程，不要用环境变量换出口（宿主代理是进程内缓存，运行时改 `PI_PROXY*` 不生效）；
+  要换出口就走 `options.fetch` + `init.proxy`（§4.7 / `FINDINGS.md` §2.6），且**只由用户手动换**
+- ❌ 不要照抄 opencode2dsh 的重试策略（匿名通道重试轰炸会挤掉自己的配额）；
+  出口池同理，失败只记账不轮换

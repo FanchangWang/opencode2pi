@@ -13,6 +13,8 @@
  *   probe  — sweep the whole roster, because that costs real inference and is
  *            therefore the user's call, not a side effect of looking.
  *   filter — ask what the roster should hide, and remember the answer.
+ *   pool   — switch which proxy the requests leave through, because the
+ *            anonymous lane meters its quota per egress IP (src/pool-cmd.ts).
  */
 
 import type { ExtensionCommandContext, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
@@ -33,11 +35,12 @@ import {
 	type ProbeResult,
 } from './health.ts'
 import { SEED_MODELS } from './seed.ts'
+import { runPoolCommand } from './pool-cmd.ts'
 
 /** Model used for the gate check: a verified id, not whatever is selected. */
 const DOCTOR_MODEL = SEED_MODELS[0]?.id ?? 'big-pickle'
 
-const USAGE = '用法：/opencode2pi <doctor|status|probe|filter>'
+const USAGE = '用法：/opencode2pi <doctor|status|probe|filter|pool>'
 
 const AGE = (record: HealthRecord): string => {
 	const minutes = Math.max(0, Math.round((Date.now() - record.checkedAt) / 60_000))
@@ -229,12 +232,14 @@ async function showMenu(ctx: ExtensionCommandContext): Promise<void> {
 		{ label: 'status', description: '显示上次探测的结果；从未探测过的模型会自动补测' },
 		{ label: 'probe', description: '重新探测全部模型（并发，2 并发）' },
 		{ label: 'filter', description: '选择要在 /model 里隐藏哪些模型（默认一个都不隐藏）' },
+		{ label: 'pool', description: '出口池：换出口 IP（本机配额用尽或地区封锁时用）' },
 	])
 	// `select` resolves to the chosen label, so the labels double as the keys.
 	if (choice === 'doctor') await runDoctorCommand(ctx)
 	else if (choice === 'status') await showStatus(ctx)
 	else if (choice === 'probe') await runProbe(ctx)
 	else if (choice === 'filter') await chooseFilters(ctx)
+	else if (choice === 'pool') await runPoolCommand(ctx)
 }
 
 async function runDoctorCommand(ctx: ExtensionCommandContext): Promise<void> {
@@ -249,6 +254,7 @@ export async function handleCommand(args: string, ctx: ExtensionCommandContext):
 	if (sub === 'status') return showStatus(ctx)
 	if (sub === 'probe') return runProbe(ctx)
 	if (sub === 'filter') return chooseFilters(ctx)
+	if (sub === 'pool') return runPoolCommand(ctx)
 	if (sub === '') return showMenu(ctx)
 	ctx.ui.notify(USAGE, 'warning')
 }

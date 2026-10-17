@@ -63,8 +63,14 @@ export const GATE_CONDITIONS: readonly string[] = [
  * the verdict, and reading a completion would spend tokens to learn nothing new.
  * The session id is derived per call so repeated probes do not share upstream
  * cache affinity.
+ *
+ * `exit` routes this one request through a candidate proxy, using the very same
+ * `init.proxy` the real path uses (pool.ts). Screening an exit with anything
+ * other than the real request shape would answer a question nobody asked: the
+ * pool exists because quota and geo blocks are per egress IP, so the only honest
+ * measurement is the gate request itself, from that IP.
  */
-export async function sendGateProbe(modelId: string, lane: LaneKey): Promise<GateProbe> {
+export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: string): Promise<GateProbe> {
 	const startedAt = Date.now()
 	const session = canonicalSessionID(`opencode2pi:gate:${modelId}:${startedAt}:${lane}`)
 	const shape = laneFor(lane)
@@ -88,7 +94,8 @@ export async function sendGateProbe(modelId: string, lane: LaneKey): Promise<Gat
 				tools: gateTools(lane),
 			}),
 			signal: AbortSignal.timeout(GATE_TIMEOUT_MS),
-		})
+			...(exit === undefined ? {} : { proxy: exit }),
+		} as RequestInit)
 	} catch (error) {
 		return { ok: false, status: undefined, body: '', latencyMs: Date.now() - startedAt, transportError: String(error) }
 	}

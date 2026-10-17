@@ -74,6 +74,12 @@
     的唯一机制，`src/index.ts` 的 `applyProvider` 是唯一写入点；隐藏集变化由
     `filters.ts` 的 `onHiddenChange` 通知，别在别处再注册一次。
 
+13. **换出口只能在 `options.fetch` + `init.proxy` 上做，且默认关着就等于没装。**
+    宿主的 `PI_PROXY*` 是进程内缓存（改环境变量无效，`FINDINGS.md` §2.6 实测三连）。
+    出口池关闭时 `poolFetch()` 返回 `undefined`、`index.ts` 因此**不加 `fetch` 键**；
+    开了就是每次请求换一个 `init.proxy`。**失败只记账、不轮换**：宿主对传输失败
+    120s 内重试 28 次，再自动换出口等于把请求量乘起来，而这条通道正是按量记账的。
+
 ---
 
 ## 项目地图
@@ -86,14 +92,21 @@ src/
   discovery.ts  三级发现阶梯（S1 实时列表 / S2 元数据 / S3 种子），15s 预算
   session.ts    按会话派生 session id
   errors.ts     上游失败分类
-  gate.ts       共享的闸门形状请求（doctor 与健康探测必须用同一份）
+  gate.ts       共享的闸门形状请求（doctor / 健康探测 / 出口探测必须用同一份）
   doctor.ts     闸门自检
   health.ts     逐模型探测 · 判定规则 · 落盘缓存
   filters.ts    用户选择的隐藏规则 + 派生隐藏集（默认一个都不隐藏）
-  commands.ts   /opencode2pi 四条命令（doctor/status/probe/filter）与 TUI
+  store.ts      数据目录与读写（`OPENCODE2PI_DATA_DIR` 可覆盖，测试用）
+  exits.ts      exits.txt 文法：解析 / 拒绝原因 / 写回 / 凭据脱敏
+  sources.ts    内置免费代理源（HTTP 子集）+ 地址行解析
+  pool.ts       出口池：开关 · 选中出口 · 证据落盘 · poolFetch · 被动标记
+  pool-probe.ts 屏检（cloudflare trace）· 闸门探测 · 内置源补充
+  pool-cmd.ts   /opencode2pi pool 的 TUI
+  commands.ts   /opencode2pi 五条命令（doctor/status/probe/filter/pool）与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts   48 项不变量测试
+  opencode2pi.test.ts   65 项不变量测试
+  pool.test.ts          20 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射）
 ```
 
 `gate.ts` 单独存在是因为：doctor 和健康探测各写一份形状的话，两者一旦漂移，
@@ -142,13 +155,15 @@ ci → typecheck → test → 校验 tarball → `npm publish --provenance` → 
 - ❌ 引入 `createProvider` / `openaiCompletions`（宿主 1.x 没有这两个导出）
 - ❌ 返回嵌套 `limits`
 - ❌ 只给 `fetchDynamicModels` 不给静态种子
-- ❌ spawn 子进程 / 移植 IP 池（宿主代理是**进程内缓存**，运行时改环境变量不生效）
+- ❌ spawn 子进程；用环境变量换出口（宿主代理是**进程内缓存**，运行时改 `PI_PROXY*` 不生效）。
+  要换出口走 `options.fetch` + `init.proxy`（`FINDINGS.md` §2.6）
 - ❌ 照抄 opencode2dsh 的重试策略（匿名通道重试轰炸会挤掉自己的配额）
 - ❌ **自动**用健康状态过滤模型列表（默认只标注；隐藏与否是用户的决定，由 `filter` 询问后落盘）
+- ❌ **自动**换出口（失败只记账；换不换由 `pool` 询问后落盘）
 
 ---
 
 ## 当前状态
 
-T1–T6 全部实现并实测通过（omp 18.6.1，2026-10-05）。
+T1–T7 全部实现并实测通过（omp 18.11.3，2026-10-17）。T7 = 出口池（手动换出口 IP）。
 未决问题见 `docs/PLAN.md` 最后一节。

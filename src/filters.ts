@@ -12,10 +12,7 @@
  * empties the roster at exactly the moment it is worth having.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
+import { readJson, writeJson } from './store.ts'
 import type { HealthStore, ModelHealth } from './health.ts'
 
 export interface ProbeFilters {
@@ -50,31 +47,21 @@ export function hiddenFromStore(store: HealthStore, filters: ProbeFilters): Read
 	return hidden
 }
 
-function storeFile(): string {
-	return join(tmpdir(), 'opencode2pi', 'filters.json')
-}
+const FILTERS_FILE = 'filters.json'
 
 export async function loadFilters(): Promise<ProbeFilters> {
-	try {
-		const parsed: unknown = JSON.parse(await readFile(storeFile(), 'utf8'))
-		if (typeof parsed !== 'object' || parsed === null) return DEFAULT_FILTERS
-		const record = parsed as Partial<ProbeFilters>
-		return {
-			hideRegionBlocked: record.hideRegionBlocked === true,
-			hideFailed: record.hideFailed === true,
-		}
-	} catch {
-		return DEFAULT_FILTERS
+	const parsed = await readJson(FILTERS_FILE)
+	if (typeof parsed !== 'object' || parsed === null) return DEFAULT_FILTERS
+	const record = parsed as Partial<ProbeFilters>
+	return {
+		hideRegionBlocked: record.hideRegionBlocked === true,
+		hideFailed: record.hideFailed === true,
 	}
 }
 
 export async function saveFilters(filters: ProbeFilters): Promise<void> {
-	try {
-		await mkdir(join(tmpdir(), 'opencode2pi'), { recursive: true })
-		await writeFile(storeFile(), JSON.stringify(filters), 'utf8')
-	} catch {
-		// An unwritable filter file costs one re-selection, never a wrong roster.
-	}
+	// An unwritable filter file costs one re-selection, never a wrong roster.
+	await writeJson(FILTERS_FILE, filters)
 }
 
 let activeFilters: ProbeFilters = DEFAULT_FILTERS

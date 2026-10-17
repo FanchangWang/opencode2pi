@@ -20,9 +20,7 @@
  * contract: discovery must never be able to break the provider.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { readJson, writeJson } from './store.ts'
 
 import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
@@ -44,9 +42,7 @@ interface MetadataCache {
 	readonly entries: readonly ModelsDevEntry[]
 }
 
-function cacheFile(): string {
-	return join(tmpdir(), 'opencode2pi', `models-dev-${MODELS_DEV_PROVIDER}.json`)
-}
+const CACHE_FILE = `models-dev-${MODELS_DEV_PROVIDER}.json`
 
 /** Narrows an arbitrary parsed JSON blob to a models.dev entry, or drops it. */
 function readEntry(raw: unknown): ModelsDevEntry | undefined {
@@ -59,23 +55,19 @@ function readEntry(raw: unknown): ModelsDevEntry | undefined {
 }
 
 async function readDiskCache(): Promise<MetadataCache | undefined> {
-	try {
-		const parsed: unknown = JSON.parse(await readFile(cacheFile(), 'utf8'))
-		if (typeof parsed !== 'object' || parsed === null) return undefined
-		if (!('entries' in parsed) || !('fetchedAt' in parsed)) return undefined
-		const { entries, fetchedAt } = parsed
-		if (typeof entries !== 'object' || entries === null) return undefined
-		if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt)) return undefined
+	const parsed = await readJson(CACHE_FILE)
+	if (typeof parsed !== 'object' || parsed === null) return undefined
+	if (!('entries' in parsed) || !('fetchedAt' in parsed)) return undefined
+	const { entries, fetchedAt } = parsed
+	if (typeof entries !== 'object' || entries === null) return undefined
+	if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt)) return undefined
 
-		const restored: ModelsDevEntry[] = []
-		for (const value of Object.values(entries)) {
-			const entry = readEntry(value)
-			if (entry) restored.push(entry)
-		}
-		return restored.length > 0 ? { entries: restored, fetchedAt } : undefined
-	} catch {
-		return undefined
+	const restored: ModelsDevEntry[] = []
+	for (const value of Object.values(entries)) {
+		const entry = readEntry(value)
+		if (entry) restored.push(entry)
 	}
+	return restored.length > 0 ? { entries: restored, fetchedAt } : undefined
 }
 
 async function writeDiskCache(entries: readonly ModelsDevEntry[]): Promise<void> {
@@ -83,12 +75,8 @@ async function writeDiskCache(entries: readonly ModelsDevEntry[]): Promise<void>
 		fetchedAt: Date.now(),
 		entries: [...entries],
 	}
-	try {
-		await mkdir(join(tmpdir(), 'opencode2pi'), { recursive: true })
-		await writeFile(cacheFile(), JSON.stringify(cache), 'utf8')
-	} catch {
-		// A cache we cannot write is a performance loss, never a failure.
-	}
+	// A cache we cannot write is a performance loss, never a failure.
+	await writeJson(CACHE_FILE, cache)
 }
 
 /** Parse the provider slice out of models.dev's whole-catalogue payload. */

@@ -179,8 +179,13 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 
 实现约束（实测）：
 
-- **`model.baseUrl` 与 `options.fetch` 均不生效**：注册期 URL 一旦固定，
-  运行期改不了（用「注册错误 URL + handler 覆盖」实测返回 404）。
+- **`model.baseUrl` 不生效，`options.fetch` 生效**：注册期 URL 一旦固定，
+  运行期改不了（用「注册错误 URL + handler 覆盖」实测返回 404）。**2026-10-17
+  更正**：初版把 `options.fetch` 与 `baseUrl` 一起写成「不生效」，实测是错的 ——
+  在 handler 里传自己的 `fetch`，宿主 `stream.ts:1356` 的 `withTransportFetch`
+  会拿它当 `base`（`transport-fetch.ts:28`），而且 `withProxyInit`
+  在调用方已给 `init.proxy` 时不再覆盖（`proxy.ts:185`）。实测三连见 §2.6。
+  注意这里的区分：**URL 只能靠注册期选 lane，出口 IP 可以逐请求换**。
   fallback 只能靠「403 FreeTierError → `findHealthyLane(model.id)` 双通道探测 →
   `setCurrentLane()` + 重新注册 provider」完成，60s 冷却（
   `LANE_SWITCH_COOLDOWN_MS`）防振荡。
@@ -192,6 +197,33 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 - 会话头按通道不同：legacy 用 `x-opencode-request: req_<16 hex>`（无
   `x-opencode-session-id`）；`/inference` 仍带 `x-opencode-session-id`（4 头
   客户端指纹）。两通道 session id 的时钟半条要求相同（§2.3）。
+
+### 2.6 逐请求换出口 IP 是可行的（2026-10-17 实测）
+
+问题：匿名配额按出口 IP 限流，而宿主的代理配置**只在进程启动时读一次环境变量**，
+运行期改 `PI_PROXY*` 无效（`utils/proxy.ts:129-151` 按 provider memo）。
+所以要运行中换出口，必须自己拿住 transport。实测三连：
+
+| # | 做法 | 结果 |
+| --- | --- | --- |
+| 1 | handler 里给 `streamSimple` 传自己的 `fetch`，wrapper 把 `init.proxy` 设成死端口 `http://127.0.0.1:9` | 请求失败：`ECONNREFUSED`，wrapper 被调用 28 次（宿主对传输失败的重试，120s 内） |
+| 2 | 同上，`init.proxy` 设成 `http://192.168.31.50:7890` | 正常 200 |
+| 3 | `fetch(url, { proxy })` 直接量出口 IP（`https://cloudflare.com/cdn-cgi/trace`） | 直连 `120.225.64.15` / `loc=CN` / 633ms；走 7890 `195.154.200.13` / `loc=FR` / `colo=CDG` / 1750ms；死端口 `ECONNREFUSED` |
+
+结论（三条各自独立）：
+
+1. **`options.fetch` 生效**：宿主拿它当 `base`（`transport-fetch.ts:28`
+   `given ?? …`），UA/CA/代理/调试层仍由宿主叠在它外面。
+2. **`init.proxy` 生效**，且调用方给的 `init.proxy` 胜过环境变量
+   （`withProxyInit` 见 `init.proxy` 已存在即原样返回，`proxy.ts:185`）——
+   于是「换出口」= 每次请求换一个 `init.proxy`，**不需要重注册、不需要重启**，
+   而「关掉」= 根本不传 `fetch`（宿主行为原样保留）。
+3. **`https://cloudflare.com/cdn-cgi/trace` 一次请求同时给出出口 IP 与地区**
+   （`ip=` / `loc=`），且是 TLS —— 拦截型 HTTP 代理伪造不了。这是候选出口
+   「免配额屏检」的请求形状（opencode2api 用同一 URL 做可达性探针）。
+
+副作用要注意：**宿主对传输层失败会重试（实测 120s 内 28 次）**，所以一个坏出口
+的代价不是一次失败，而是一串；这也正是换出口前必须先屏检（不花配额）的理由。
 
 ## 3. omp 扩展 API 的实测行为
 

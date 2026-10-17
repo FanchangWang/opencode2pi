@@ -19,10 +19,7 @@
  * Health is annotation only. It never removes a model from the roster.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
+import { readJson, writeJson } from './store.ts'
 import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
@@ -195,41 +192,35 @@ export async function probeAll(
 
 export type HealthStore = Readonly<Record<string, HealthRecord>>
 
-function storeFile(): string {
-	return join(tmpdir(), 'opencode2pi', 'health.json')
-}
+const HEALTH_FILE = 'health.json'
 
 export async function loadHealth(): Promise<HealthStore> {
-	try {
-		const parsed: unknown = JSON.parse(await readFile(storeFile(), 'utf8'))
-		if (typeof parsed !== 'object' || parsed === null) return {}
-		const out: Record<string, HealthRecord> = {}
-		for (const [id, value] of Object.entries(parsed)) {
-			if (typeof value !== 'object' || value === null) continue
-			if (!('health' in value) || !('checkedAt' in value)) continue
-			const record = value as Partial<HealthRecord>
-			if (typeof record.checkedAt !== 'number') continue
-			if (
-				record.health !== 'ok' &&
-				record.health !== 'flaky' &&
-				record.health !== 'dead' &&
-				record.health !== 'unknown' &&
-				record.health !== 'limited'
-			)
-				continue
-			out[id] = {
-				health: record.health,
-				kind: record.kind ?? 'UNKNOWN',
-				detail: typeof record.detail === 'string' ? record.detail : '',
-				checkedAt: record.checkedAt,
-				terminalFailures: typeof record.terminalFailures === 'number' ? record.terminalFailures : 0,
-				transientFailures: typeof record.transientFailures === 'number' ? record.transientFailures : 0,
-			}
+	const parsed = await readJson(HEALTH_FILE)
+	if (typeof parsed !== 'object' || parsed === null) return {}
+	const out: Record<string, HealthRecord> = {}
+	for (const [id, value] of Object.entries(parsed)) {
+		if (typeof value !== 'object' || value === null) continue
+		if (!('health' in value) || !('checkedAt' in value)) continue
+		const record = value as Partial<HealthRecord>
+		if (typeof record.checkedAt !== 'number') continue
+		if (
+			record.health !== 'ok' &&
+			record.health !== 'flaky' &&
+			record.health !== 'dead' &&
+			record.health !== 'unknown' &&
+			record.health !== 'limited'
+		)
+			continue
+		out[id] = {
+			health: record.health,
+			kind: record.kind ?? 'UNKNOWN',
+			detail: typeof record.detail === 'string' ? record.detail : '',
+			checkedAt: record.checkedAt,
+			terminalFailures: typeof record.terminalFailures === 'number' ? record.terminalFailures : 0,
+			transientFailures: typeof record.transientFailures === 'number' ? record.transientFailures : 0,
 		}
-		return out
-	} catch {
-		return {}
 	}
+	return out
 }
 
 /**
@@ -297,13 +288,8 @@ export function pruneHealth(store: HealthStore, keep: ReadonlySet<string>): Heal
  */
 export async function saveHealth(results: readonly ProbeResult[], keep: ReadonlySet<string>): Promise<HealthStore> {
 	const merged = pruneHealth(mergeHealth(await loadHealth(), results), keep)
-
-	try {
-		await mkdir(join(tmpdir(), 'opencode2pi'), { recursive: true })
-		await writeFile(storeFile(), JSON.stringify(merged), 'utf8')
-	} catch {
-		// An unwritable cache only costs a re-probe.
-	}
+	// An unwritable cache only costs a re-probe.
+	await writeJson(HEALTH_FILE, merged)
 	return merged
 }
 

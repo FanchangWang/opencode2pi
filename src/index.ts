@@ -17,11 +17,13 @@
  * inherent to the openai-completions engine, so condition 3 is the only body
  * change this extension has to make.
  *
- * The host resolves the request URL from the provider registration and
- * neither `model.baseUrl` nor `options.fetch` can redirect it (both probed
- * 2026-10-17), so lane preference is registration-level: the legacy /zen/v1
- * lane is registered first, and a shape rejection re-probes both lanes and
- * re-registers against the healthy one.
+ * The host resolves the request URL from the provider registration — a
+ * `model.baseUrl` set at request time cannot redirect it (probed 2026-10-17) —
+ * so lane preference is registration-level: the legacy /zen/v1 lane is
+ * registered first, and a shape rejection re-probes both lanes and
+ * re-registers against the healthy one. The transport is a different story:
+ * `options.fetch` IS honored, so a caller-supplied `init.proxy` picks the
+ * egress per request (FINDINGS §2.6).
  *
  * Integration seam (verified against omp 18.6.1 — see docs/FINDINGS.md):
  *   - `pi.registerProvider` config accepts `onPayload` / `prepareRequest`
@@ -43,6 +45,7 @@ import { handleCommand } from './commands.ts'
 import { classifyUpstreamFailure, formatFailure } from './errors.ts'
 import { hidden, loadFilters, onHiddenChange, publishFilters, publishHealth } from './filters.ts'
 import { loadHealth } from './health.ts'
+import { activeCandidate, loadPool, poolEnabled, poolFetch, recordPassive } from './pool.ts'
 import { laneFor, type LaneKey } from './lanes.ts'
 import { findHealthyLane } from './gate.ts'
 import { currentLane, setCurrentLane } from './lanes.ts'
@@ -144,7 +147,14 @@ registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStrea
 		headers: { ...model.headers, ...lane.sessionHeaders(session.id) },
 	}
 
-	const upstream = streamSimple(builtin, gatedContext, forwarded)
+	// The exit pool rides on `options.fetch`, the seam the host demonstrably
+	// honours (FINDINGS §2.6): a caller-supplied `init.proxy` wins over the
+	// environment, which is what makes switching exits possible mid-session at
+	// all. `poolFetch` returns `undefined` while the pool is off, and then this
+	// spread adds no key — the request leaves exactly as it did before the
+	// feature existed, `PI_PROXY` and all.
+	const proxied = poolFetch(forwarded.fetch)
+	const upstream = streamSimple(builtin, gatedContext, proxied === undefined ? forwarded : { ...forwarded, fetch: proxied })
 
 	// Failures arrive as a stream *event*, not a rejected promise, so
 	// classification means forwarding the stream and rewriting that event.
@@ -154,9 +164,13 @@ registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStrea
 		try {
 			for await (const event of upstream) {
 				if (event.type === 'error') {
-					if (classifyUpstreamFailure(event.error.errorStatus, event.error.errorMessage ?? '').kind === 'SHAPE_REJECTED') {
-						sawShapeRejection = true
-					}
+					const kind = classifyUpstreamFailure(event.error.errorStatus, event.error.errorMessage ?? '').kind
+					if (kind === 'SHAPE_REJECTED') sawShapeRejection = true
+					// Attribute quota and geo refusals to the exit that produced
+					// them. This is the pool's only automatic act, and it is
+					// deliberately observation-only: rotating on failure is what
+					// this repo refuses to do.
+					if (kind === 'RATE_LIMIT' || kind === 'REGION_BLOCKED') await recordPassive(model.id, kind)
 					relayed.push(
 						{ ...event, error: explainFailure(model.id, event.error) },
 					)
@@ -235,6 +249,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// before the first registration rather than applied on the next probe.
 	publishFilters(await loadFilters())
 	publishHealth(await loadHealth())
+	// The selected exit is part of the request path, so it is adopted before the
+	// first request can be made, not lazily on first use.
+	await loadPool()
 	onHiddenChange(() => reapply?.())
 	applyProvider(pi)
 
@@ -255,7 +272,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	pi.logger.info(
 		`[${PROVIDER}] registered · process session ${PROCESS_SESSION} · seed ${SEED_MODELS.length} models · ` +
 			`verified-free ${Object.keys(VERIFIED_FREE).length} · known-rejected ${Object.keys(UNAVAILABLE).length} · ` +
-			`hidden ${hidden().size}`,
+			`hidden ${hidden().size} · ` +
+			(poolEnabled() ? `exit pool on (${activeCandidate()?.label ?? '未选中出口，直连'})` : 'exit pool off'),
 	)
 }
 

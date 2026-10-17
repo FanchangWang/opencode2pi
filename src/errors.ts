@@ -32,7 +32,7 @@ const ADVICE: Readonly<Record<UpstreamFailure, string>> = {
 	SHAPE_REJECTED: '上游形状闸门拒绝（FreeTierError）：通常是本扩展的 bug，请提 issue。闸门需要 Bearer public + 规范 session id（低 12 位解码为逐毫秒计数器、须落在 [1,63]，摘要填充会被 403）+ 双通道形状之一（legacy /zen/v1：单 read 工具；/inference：shell/read 真实 OpenCode 定义）。',
 	REGION_BLOCKED: '该模型在当前网络地区不可用（RegionError）：这是地区封锁，不是凭据问题，换一个模型或网络节点。',
 	MODEL_GONE: '模型已下线（ModelError）：上游已不再支持该模型，请查看可用模型列表。',
-	RATE_LIMIT: '匿名配额按出口 IP 限流（429）：等待配额恢复，或设置 PI_PROXY_OPENCODE_ZEN_FREE 换出口（宿主按 provider id 派生命名：opencode-zen-free → OPENCODE_ZEN_FREE）。',
+	RATE_LIMIT: '匿名配额按出口 IP 限流（429）：这条通道按出口 IP 记账，等窗口滚动，或运行 /opencode2pi pool 换一个出口（不动进程环境变量，当前会话内生效）。',
 	REQUEST_REJECTED: '上游拒绝了请求（400）：该模型无法处理这次输入。最常见的是给只支持文本的模型发图片 —— 本扩展按 models.dev 的 modalities 声明放行，换一个支持对应输入的模型即可。',
 	UPSTREAM: '上游暂时不可用（5xx）：稍后重试，或换一个模型。',
 	AUTH: '匿名凭据被拒：本扩展不需要 API key，出现这个说明上游认证方式变了，请提 issue。',
