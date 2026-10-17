@@ -69,29 +69,36 @@ jobs:
           # exact-match assertions below hold on every runner.
           contents="$(tar -tzf "$tarball" | tr -d '\r')"
           echo "$contents"
-          for required in \
-            package/src/index.ts \
-            package/src/commands.ts \
-            package/src/discovery.ts \
-            package/src/doctor.ts \
-            package/src/errors.ts \
-            package/src/exits.ts \
-            package/src/filters.ts \
-            package/src/gate.ts \
-            package/src/health.ts \
-            package/src/host.d.ts \
-            package/src/lanes.ts \
-            package/src/metadata.ts \
-            package/src/pool-cmd.ts \
-            package/src/pool-probe.ts \
-            package/src/pool.ts \
-            package/src/seed.ts \
-            package/src/session.ts \
-            package/src/sources.ts \
-            package/src/store.ts \
-            package/src/tools.ts; do
-            echo "$contents" | grep -qx "$required" || { echo "::error::$required missing from tarball"; exit 1; }
-          done
+          # The expected list is derived from the working tree rather than
+          # written out by hand. A hardcoded list is the same class of bug as
+          # the one this step exists to catch: every new module has to be
+          # remembered here, and a release is exactly when nobody is adding
+          # modules. `request.ts`, `transport.ts` and all of `host/` were added
+          # without being added here. Comparing against `find src -name '*.ts'`
+          # cannot drift.
+          #
+          # `npm pack` resolves `files: ["src/"]`, so everything under src/
+          # must be in the tarball. The reverse — files present but unwanted —
+          # is npm's business, so only the missing direction is asserted.
+          missing=0
+          while IFS= read -r required; do
+            echo "$contents" | grep -qx "package/$required" || {
+              echo "::error::$required is in src/ but missing from the tarball"
+              missing=1
+            }
+          done < <(find src -name '*.ts' -type f | sed 's|\\|/|g' | sort)
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::tarball payload does not match src/; the published package would break at runtime"
+            exit 1
+          fi
+          # An empty or near-empty src/ would satisfy that loop vacuously, which
+          # is the same silent pass this step exists to prevent.
+          count="$(find src -name '*.ts' -type f | wc -l | tr -d ' ')"
+          if [ "$count" -lt 10 ]; then
+            echo "::error::only $count TypeScript files found under src/; the file list is not being discovered"
+            exit 1
+          fi
+          echo "verified $count source files against the tarball"
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
       # Secrets are not directly readable in an `if:` expression, so the
