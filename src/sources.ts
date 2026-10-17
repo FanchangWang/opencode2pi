@@ -1,64 +1,106 @@
 /**
  * Free exit-IP source list — the `http://` subset of `opencode2dsh`'s
- * `packages/plugin/src/pool/sources.ts`, ported verbatim on 2026-10-17 (URLs
- * and their fast→slow order unchanged).
+ * `packages/plugin/src/pool/sources.ts`, ported on 2026-10-17.
  *
- * Only `protocol: 'http'` entries were carried over. The reference also lists
- * 29 `protocol: 'socks5'` entries, but they are deliberately dropped: the
- * runtime is Bun 1.4.3, whose `fetch(url, { proxy })` rejects every socks
- * variant with `TypeError: UnsupportedProxyProtocol` — measured, not assumed —
- * so a socks source could never yield a single usable exit IP here.
- * "别把跑不通的东西放进池子里" is cheaper than discovering it at refill time.
+ * Twenty-two `raw.githubusercontent.com`-and-friends URLs, in **one flat list with
+ * no tiers**. They used to carry a `'fast' | 'slow'` label, ported along with the
+ * order from the reference's `fastUpdateSources` / `slowUpdateSources`. That label
+ * was never measured here — it was a hand-ordered guess from another codebase —
+ * and all it actually did was split each round's screen budget in two and keep
+ * fourteen sources permanently second. The tier was removed on 2026-10-17: every
+ * source is fetched together and the addresses are shuffled as one pool, so a
+ * round samples all twenty-two rather than exhausting eight before touching the
+ * rest. `discoverExit` in pool-probe.ts is the only consumer.
+ *
+ * Of these twenty-two, twenty are `raw.githubusercontent.com`. They were jsdelivr
+ * (`cdn.jsdelivr.net/gh/…`) until 2026-10-17, when measuring which hosts this
+ * machine can actually reach showed 20 of the 22 sources failing on direct
+ * access and only two responding — so the CDN was not an asset here, and a
+ * source list that mostly returns `fetch failed` is worse than a short one.
+ *
+ * **The branch in each URL is verified, not assumed.** Six of these repositories
+ * do not use `main`:
+ *
+ *   · databay-labs/free-proxy-list → `master`
+ *   · sunny9577/proxy-scraper→ `master`
+ *   · TheSpeedX/PROXY-List          → `master`
+ *   · TheSpeedX/SOCKS-List          → `master`
+ *   · vakhov/fresh-proxy-list       → `master`
+ *   · Zaeem20/FREE_PROXIES_LIST     → `master`
+ *
+ * Confirmed against the GitHub API's `default_branch` on 2026-10-17, and the
+ * one path that had been written as `main` for a `master` repo
+ * (`sunny9577/proxy-scraper/generated/http_proxies.txt`) was measured to fail on
+ * that branch. A wrong branch is a 404 that looks exactly like a dead proxy list,
+ * which is why this is written down rather than left to whoever edits it next.
+ *
+ * `http://` entries only. The reference also lists 29 `socks5` entries,
+ * deliberately dropped: the runtimes this runs on reject every socks variant
+ * (`UnsupportedProxyProtocol` on Bun, and an HTTP-only exit list is what an HTTP
+ * pool can use), measured rather than assumed. "别把跑不通的东西放进池子里" is
+ * cheaper than discovering it at refill time.
  *
  * The list is data, not transport: no network code lives here, and nothing in
- * this module runs on import.
+ * this module runs on import. {@link GITHUB_MIRRORS} is the one exception and it
+ * is still only data — pool-probe.ts reads it.
  *
  * Note carried over from the reference: dead lists are common in this space —
  * candidates found dead (ShiftyTR, clarketm, mmpx12, proxy-list.download…)
  * were already dropped upstream, and the survivors still rot over time.
  */
 
-export interface FreeSource {
-	readonly url: string
-	readonly tier: 'fast' | 'slow'
-}
+/**
+ * Prefixed onto a source URL when `raw.githubusercontent.com` cannot be reached,
+ * tried in this order.
+ *
+ * Prefixed directly onto the raw URL, so a GitHub-hosted source becomes
+ * `https://ghproxy.net/https://raw.githubusercontent.com/…`. All three were
+ * verified to serve real content on 2026-10-17 (2710 lines, HTTP 200): ghproxy
+ * in 1105 ms, github.allproxy.dpdns.org in 1004 ms, wget.la in 4481 ms.
+ *
+ * Order is fastest-measured first, with wget.la last rather than first because it
+ * was three times slower than the other two and a fourth position costs nothing.
+ */
+export const GITHUB_MIRRORS: readonly string[] = [
+	'https://ghproxy.net',
+	'https://github.allproxy.dpdns.org',
+	'https://wget.la',
+]
 
-export const FREE_SOURCES: readonly FreeSource[] = [
-	// fast tier (GoProxy fastUpdateSources)
-	{ url: 'https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt', tier: 'fast' },
-	{ url: 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt', tier: 'fast' },
-	{ url: 'https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt', tier: 'fast' },
-	{ url: 'https://cdn.jsdelivr.net/gh/sunny9577/proxy-scraper/generated/http_proxies.txt', tier: 'fast' },
-	// fast tier additions (2026-09-09, live-verified upstream)
-	{ url: 'https://raw.githubusercontent.com/proxio-io/proxy-list/main/http.txt', tier: 'fast' },
-	{
-		url: 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
-		tier: 'fast',
-	},
-	{ url: 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', tier: 'fast' },
-	{ url: 'https://proxyspace.pro/http.txt', tier: 'fast' },
-	// slow tier (GoProxy slowUpdateSources)
-	{ url: 'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt', tier: 'slow' },
-	{ url: 'https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt', tier: 'slow' },
-	{
-		url: 'https://cdn.jsdelivr.net/gh/Anonym0usWork1221/Free-Proxies/proxy_files/http_proxies.txt',
-		tier: 'slow',
-	},
-	{ url: 'https://cdn.jsdelivr.net/gh/ALIILAPRO/Proxy/http.txt', tier: 'slow' },
-	{ url: 'https://cdn.jsdelivr.net/gh/vakhov/fresh-proxy-list/http.txt', tier: 'slow' },
-	{ url: 'https://cdn.jsdelivr.net/gh/Zaeem20/FREE_PROXIES_LIST/http.txt', tier: 'slow' },
-	{ url: 'https://cdn.jsdelivr.net/gh/proxy4parsing/proxy-list/http.txt', tier: 'slow' },
-	// slow tier additions (2026-09-09, live-verified upstream)
-	{ url: 'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt', tier: 'slow' },
-	{ url: 'https://raw.githubusercontent.com/Tianndev/free-proxy/main/proxy/http.txt', tier: 'slow' },
-	{ url: 'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt', tier: 'slow' },
-	{ url: 'https://raw.githubusercontent.com/proxmint/free-proxy-list/main/proxies/http.txt', tier: 'slow' },
-	{ url: 'https://raw.githubusercontent.com/Ian-Lusule/Proxies/main/proxies/http.txt', tier: 'slow' },
-	{ url: 'http://openproxylist.xyz/http.txt', tier: 'slow' },
-	{
-		url: 'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all',
-		tier: 'slow',
-	},
+/**
+ * Every free list worth pulling, all treated alike.
+ *
+ * Order carries no meaning: the addresses these produce are shuffled together
+ * before screening, so nothing here is reached "first" except by chance.
+ */
+export const FREE_SOURCES: readonly string[] = [
+	'https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt',
+	'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+	'https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt',
+	// `master`, not `main` — measured: the main branch of this repo 404s here.
+	'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt',
+	'https://raw.githubusercontent.com/proxio-io/proxy-list/main/http.txt',
+	'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
+	'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+	'https://proxyspace.pro/http.txt',
+	'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt',
+	'https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt',
+	'https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt',
+	'https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt',
+	'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt',
+	'https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt',
+	'https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt',
+	// live-verified upstream 2026-09-09
+	'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt',
+	'https://raw.githubusercontent.com/Tianndev/free-proxy/main/proxy/http.txt',
+	'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt',
+	'https://raw.githubusercontent.com/proxymint/free-proxy-list/main/proxies/http.txt',
+	'https://raw.githubusercontent.com/Ian-Lusule/Proxies/main/proxies/http.txt',
+	'http://openproxylist.xyz/http.txt',
+	// Replaces api.proxyscrape.com, which was unreachable here while this GitHub
+	// path answered 1201 proxy lines on the same measurement. Same `http://ip:port`
+	// per line, so `parseProxyLine` reads it unchanged.
+	'https://raw.githubusercontent.com/ProxyScrape/free-proxy-list/main/proxies/protocols/http/data.txt',
 ]
 
 /** `host:port` or `scheme://host:port` -> canonical `http://host:port`; null when unusable. */
