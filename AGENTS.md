@@ -74,11 +74,15 @@
     的唯一机制，`src/index.ts` 的 `applyProvider` 是唯一写入点；隐藏集变化由
     `filters.ts` 的 `onHiddenChange` 通知，别在别处再注册一次。
 
-13. **换出口只能在 `options.fetch` + `init.proxy` 上做，且默认关着就等于没装。**
+13. **换出口只能在宿主的 fetch 接缝上做，且默认关着就等于没装。**
     宿主的 `PI_PROXY*` 是进程内缓存（改环境变量无效，`FINDINGS.md` §2.6 实测三连）。
     出口池关闭时 `poolFetch()` 返回 `undefined`、`index.ts` 因此**不加 `fetch` 键**；
-    开了就是每次请求换一个 `init.proxy`。**失败只记账、不轮换**：宿主对传输失败
+    开了就是每次请求换一个出口。**失败只记账、不轮换**：宿主对传输失败
     120s 内重试 28 次，再自动换出口等于把请求量乘起来，而这条通道正是按量记账的。
+    **代理机制按运行时选，不按宿主选**（`src/transport.ts`）：Bun 走 `init.proxy`，
+    **Node 走 undici 的 `ProxyAgent` 且必须同时替换 fetch**。Node 会**静默忽略**
+    `init.proxy`（不报错、直连），所以屏检与真实请求必须共用同一个 transport ——
+    否则会出现「屏检走的代理、真实请求直连」这种最难查的偏差（`FINDINGS.md` §2.7）。
 
 ---
 
@@ -87,30 +91,43 @@
 ```
 src/
   index.ts      provider 注册（可重写）· 闸门形状补全 · 错误流转发 · 命令注册
+  request.ts    请求路径（两端宿主相同）：工具集整形 · session id 上头 · 出口池挂 fetch · 流转发
+  host/
+    contract.ts 宿主边界：扩展需要的全部能力，用两边都不认的术语表达
+    omp.ts      omp 适配（Context 分离字段 / ui.select 带 description / errorStatus 数字）
+    pi.ts       pi 适配（从 system message 回放工具声明 / 字符串 ui.select / 从文本解析状态）
+  transport.ts  代理机制按运行时选：Bun 的 init.proxy / Node 的 undici ProxyAgent
   seed.ts       静态种子（冷启动必需）+ 已知实测失效的 id
   metadata.ts   models.dev → 宿主扁平模型契约；免费判定顺序
   discovery.ts  三级发现阶梯（S1 实时列表 / S2 元数据 / S3 种子），15s 预算
   session.ts    按会话派生 session id
   errors.ts     上游失败分类
   gate.ts       共享的闸门形状请求（doctor / 健康探测 / 出口探测必须用同一份）
+  lanes.ts      双通道形状中心：legacy /zen/v1 与 /inference 的 headers / 当前 lane
   doctor.ts     闸门自检
   health.ts     逐模型探测 · 判定规则 · 落盘缓存
   filters.ts    用户选择的隐藏规则 + 派生隐藏集（默认一个都不隐藏）
   store.ts      数据目录与读写（`OPENCODE2PI_DATA_DIR` 可覆盖，测试用）
   exits.ts      exits.txt 文法：解析 / 拒绝原因 / 写回 / 凭据脱敏
-  sources.ts    内置免费代理源（HTTP 子集）+ 地址行解析
+  sources.ts    内置免费代理源（22 条，**不分档**）+ 地址行解析
   pool.ts       出口池：开关 · 选中出口 · 证据落盘 · poolFetch · 被动标记
-  pool-probe.ts 屏检（cloudflare trace）· 闸门探测 · 内置源补充
-  pool-cmd.ts   /opencode2pi pool 的 TUI
+  pool-probe.ts 屏检（cloudflare trace，5s）· 闸门探测 · 内置源补充（合并取源 + 1h 源缓存）
+  pool-cmd.ts   /opencode2pi pool 的五项 TUI 菜单
   commands.ts   /opencode2pi 五条命令（doctor/status/probe/filter/pool）与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts   65 项不变量测试
-  pool.test.ts          20 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射）
+  opencode2pi.test.ts    65 项不变量测试
+  pool.test.ts           73 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射 / 24h 隔离 / 只留闸门通过的 / 发现轮次不停机 / 源缓存不重下）
+  transport.test.ts       8 项代理机制（Bun init.proxy / Node dispatcher 不写 proxy）
+  host-boundary.test.ts    3 项 src/host/ 下不许出现宿主包名
+  session-headers.test.ts  3 项 session 头在两层宿主都真的上了线
 ```
 
 `gate.ts` 单独存在是因为：doctor 和健康探测各写一份形状的话，两者一旦漂移，
 doctor 会报「闸门正常」而真实路径已失效 —— 那正是这段代码唯一要抓的故障。
+
+`src/host/` 之下**不许出现宿主包名**：共享层只跟 `contract.ts` 的接口说话，
+具体某个宿主怎么拼写由适配器独家承担。这是双宿主共用一条代码路径的前提。
 
 ---
 

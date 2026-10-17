@@ -225,6 +225,49 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 副作用要注意：**宿主对传输层失败会重试（实测 120s 内 28 次）**，所以一个坏出口
 的代价不是一次失败，而是一串；这也正是换出口前必须先屏检（不花配额）的理由。
 
+### 2.7 `init.proxy` 只在 Bun 上成立，Node 会静默忽略（2026-10-17 实测，修正 §2.6 第 2 条）
+
+§2.6 的第 2 条当时只在 omp 上量过。补测 Node（pi）时结论反了一半：
+
+| 运行时 | `fetch(url, { proxy })` | 实测出口 IP |
+| --- | --- | --- |
+| **Bun** 26.3.0（omp） | 生效 | 直连 `120.225.64.15` / 走 `192.168.31.50:7890` → `195.154.200.13` |
+| **Node** 22.22.2（pi） | **静默忽略** | 直连、美国代理 `40.192.70.191`、局域网代理 **全部** `120.225.64.15` |
+
+`proxy` 是 Bun 给 `RequestInit` 加的扩展字段。undici 对未知的 init 属性
+**不报错也不提示**，直接丢弃 —— 所以在 Node 上 `poolFetch` 返回了一个函数，
+而这个函数做的事和直连完全一样。
+
+这是本项目里最危险的一类失败：**在线路上无法区分「池在工作」和「池是摆设」**。
+菜单照常显示选中的出口、屏检证据照常显示，而每个请求仍从本机 IP 出发 ——
+恰好是配额已经耗尽的那个地址。
+
+连带的次生损害：屏检（`traceEgress`）当时也用 `init.proxy`，于是在 Node 上
+六个出口（含美国 IP `40.192.70.191`）全部测出 `exitIP = 120.225.64.15` ——
+屏检从来没测过代理，全在测本机，于是把死代理判成 A/B 档「可用」并写进了
+`pool.json`。**这批可用性证据在修复前整体不可信，需要重新屏检。**
+
+Node 上的机制是 undici 的 `ProxyAgent`，有一个必须写下来的坑：
+
+> **dispatcher 只与构造它的那份 undici 的 `fetch` 配套。**
+> 把外部 undici 的 `ProxyAgent` 交给 Node 内置的全局 `fetch`，
+> 会 `TypeError: fetch failed`（实测）——因为全局那个属于 Node *内部* 的 undici。
+
+所以 wrapper 必须整体切换 `fetch`，不能只换 dispatcher。实测 Node 侧换成
+`undici.fetch` + `ProxyAgent` 后：直连 `2409:8a3c:…` → 走代理 `195.154.200.13`。
+
+undici 的来源按序尝试（实测）：先 `import('undici')`，再用
+`createRequire(process.argv[1])` 从**宿主自己的入口脚本**向上解析 ——
+pi 自带 undici 8.10.2，且是 `@earendil-works/pi-coding-agent` 的**直接**依赖，
+实测可解析。同时声明为 optional peerDependency，只提示不强求。
+
+顺带确认一件事，因为它决定了要不要写两条路：**pi 无论用哪种方式安装，
+内部都是 Node。** 它的 `dist/bundle/cli.js` shebang 是 `#!/usr/bin/env node`
+（从安装文件读出），`engines.node >= 22.19.0`，`pi.ps1` / `pi.cmd` 都显式
+`& node pi-launcher.js`。而 `bun add --global` **遵从 shebang** —— 用一个
+自建包实测：`#!/usr/bin/env node` 的 shim 拉起 node；改成 `#!/usr/bin/env bun`
+则尝试拉 bun 并失败。所以判断依据只能是运行时本身，不能是宿主名或安装方式。
+
 ## 3. omp 扩展 API 的实测行为
 
 ### 3.1 `pi.registerProvider` 的 `onPayload` / `prepareRequest` 是哑字段
@@ -233,20 +276,68 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 
 > **不要用这两个字段。** 这是本项目第一版的失败点，也是最容易浪费时间的坑。
 
-### 3.2 真正的接缝是 `registerCustomApi`
+### 3.2 真正的接缝是 `registerProvider` 里的 `streamSimple`（2026-10-17 修正）
 
-从 omp 内置的 pi-ai 里反解出的签名：
+> **本节此前写的是「真正的接缝是 `registerCustomApi`」，那条结论只在 omp 上成立，
+> 并且直接导致 pi 启动崩溃。** 保留 `registerCustomApi` 的签名仅作 omp 侧参考。
+
+omp 内置 pi-ai 里的签名（仅 omp 有）：
 
 ```ts
 registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn): void
-// arity = 4；`stream` 省略时降级为 (model, ctx, opts) => streamSimple(model, ctx, opts)
 ```
 
-- `streamSimple` 的入参是 `(model, context, options)`；
-- `context` 是**结构化对象**（`systemPrompt` / `messages` / `tools` / `toolChoice`），**不是序列化 body**。所以闸门要加在 `context.tools` 上，而不是改 JSON 字符串。
-- 委托宿主引擎时必须把 `model.api` 换回 `'openai-completions'`，否则会递归回自己的 handler。
+**pi 1.3.0 没有 `registerCustomApi`**，也没有任何进程级 custom-API 注册表。唯一的
+注册入口是 `pi.registerProvider(name, { api, streamSimple, ... })`，它在 omp 侧会内部
+转发到 `registerCustomApi`（`src/config/model-registry.ts:3453-3476`）。因此统一走
+`registerProvider`：
 
-工作实现见 `src/index.ts` 的 `registerCustomApi(...)`；双通道形状（含 `gateTools`）集中在 `src/lanes.ts` 的 `LANES`。
+```ts
+pi.registerProvider(PROVIDER, { baseUrl, api: API_ID, apiKey: 'public', authHeader: true, headers, models, streamSimple })
+```
+
+共同约束：
+
+- `streamSimple` 入参是 `(model, context, options)`；
+- 委托宿主引擎时必须把 `model.api` 换回 `'openai-completions'`，否则会递归回自己的 handler；
+- `toolChoice` 在 `options` 上，不在 context 上。
+
+**context 形状两侧不同**（这是适配层存在的根本原因）：
+
+| | omp 18.11.3 | pi 1.3.0 |
+| --- | --- | --- |
+| context | 结构化：`systemPrompt` / `messages` / `tools` | **transcript**：prompt 和工具声明在 leading system message |
+| 取工具 | `context.tools` | `getCurrentTools(messages)` |
+| 写回工具 | `{ ...ctx, tools }` | 折叠后写 leading system message 的 `toolsAdded` |
+| 流终止 | `fail(err)` | 只有 `end()` |
+| 错误状态 | 有 `errorStatus` | 无，状态折进文本 `"<status>: <body>"` |
+| logger | 有 `pi.logger` | **没有** |
+
+`pi.logger` 的有无就是两者的判别信号（`src/index.ts` 的 `detectAdapter`）。
+
+### 3.2b pi 会覆盖 `x-opencode-session`（2026-10-17 实测，形状闸门在 pi 上失败的唯一原因）
+
+只要 `baseUrl` 是 `opencode.ai`，pi 就认为这是它自己的 provider：
+
+- `core/provider-attribution.ts:67-77` 从 `transformHeaders` 钩子写入
+  **pi 自己的** session id 与 `x-opencode-client: pi`；
+- 该钩子在 model headers 解析**之后**执行，合并顺序把宿主值放**最后**
+  （`core/sdk.ts:354-364`）。
+
+所以只挂在 `model.headers` 上的 session 头会被静默替换成 pi 的 UUID。上游闸门要求
+`x-opencode-session` 是规范 `ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`，于是返回裸
+`FreeTierError`——**与 omp 同一请求的结果差异只有这一处**（omp 429 = 过闸门，pi
+FreeTierError = 被形状拒绝）。
+
+修法：session 头**同时**挂到 `options.headers`。该层作为 `requestHeaders` 传入归属钩子，
+而钩子最后才 apply 它，所以我们的值胜出。回归测试 `test/session-headers.test.ts`。
+
+### 3.2c 附带实测：pi 会带上 `x-stainless-*` 与 `stream_options`
+
+pi 的 openai-completions 走官方 `openai` SDK，请求因此多出 `x-stainless-*` 系列头、
+`stream_options.include_usage`，并用 `max_completion_tokens` 而非 `max_tokens`。实测
+**这些都不影响闸门**（修复 session 头后 pi 与 omp 返回同一个 429）。记录在此以免将来
+误判为形状差异。
 
 ### 3.3 omp 内置的 pi-ai 是 1.x，API 面与 opencode2dsh 依赖的不同
 
@@ -255,16 +346,45 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 - ❌ 没有：`createProvider`、`openaiCompletions`
 - ✅ 有：`streamSimple`、`streamSimpleOpenAIResponses`、`registerCustomApi`、`getCustomApi`、`clearCustomApis`、`AssistantMessageEventStream`
 
-结论：**DSH 那套写法不能照搬**，必须走 `registerCustomApi` + 宿主引擎委托。
+结论：**DSH 那套写法不能照搬**，必须走 provider 注册 + 宿主引擎委托。
 
 ### 3.4 import 说明符
 
-`@earendil-works/*` 会被 omp 的 legacy-pi compat shim 改写到宿主内置副本，实测可用。宿主类型包是 `@oh-my-pi/pi-coding-agent`（仅类型，运行时会被擦除）。
+`@earendil-works/*` 会被 omp 的 legacy-pi compat shim 改写到宿主内置副本，实测可用；pi
+侧由 jiti alias 指向 `ai/dist/compat.js`。宿主类型包是 `@oh-my-pi/pi-coding-agent`（仅
+类型，运行时会被擦除）。运行时导入一律写在 `src/host/` 内，由 `test/host-boundary.test.ts`
+断言这条分层规则不被破坏。
 
 ### 3.5 命令行细节
 
 - `--provider <id>` 在扩展加载前就做校验，会报 `Unknown provider`。扩展注册的 provider 必须用 `--model <provider>/<model>` 形式指定。
 - `-e <path>` 支持绝对路径与相对路径。
+
+### 3.6 omp 的 select 不是不显示 description，是会自动折叠（2026-10-17 实测）
+
+现象：出口池菜单在 pi 上每行都带检测结果，在 omp 上只有当前高亮那一行带。
+第一反应是「omp 不支持」，不是。omp 的 `select` 收
+`ExtensionUISelectItem = string | {label, description?}`
+（`extensibility/extensions/types.ts:151-156`），一路透传到
+`HookSelectorComponent`（`packages/tui/src/overlays/hook-selector.ts`），
+`#renderOptionLines` 确实会把 description 渲染成第二行。
+
+真正的原因是 **compact 模式**（同文件 `:577-578`）：
+
+```ts
+#isSearchEnabled(renderWidth, mdTheme) {
+  return this.#totalOptionRows(this.#options, renderWidth, mdTheme) > this.#maxVisible
+}
+```
+
+`maxVisible = max(4, min(15, terminal.rows - 12))`，也就是**最多 15 行**。
+一旦「所有行都展开 description」的总行数超过这个预算，就进入 compact：
+所有行塌成 label，**只有高亮行的 description 单独渲染**在下方
+（`:505` 的 `descMode = compact ? (isSelected ? selectedDescRows : 0) : "full"`），
+并顺带开启搜索框。
+
+出口池的行天然是「多行 + 长描述」，几乎必然触发。所以这不是能力差异，
+是行数预算。要在 omp 上也看到全部检测结果，只能缩短 description。
 
 ## 4. 可用的现成扩展：全部不可用，但原因各不相同
 
