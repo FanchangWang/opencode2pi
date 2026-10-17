@@ -75,14 +75,20 @@ jobs:
             package/src/discovery.ts \
             package/src/doctor.ts \
             package/src/errors.ts \
+            package/src/exits.ts \
             package/src/filters.ts \
             package/src/gate.ts \
             package/src/health.ts \
             package/src/host.d.ts \
             package/src/lanes.ts \
             package/src/metadata.ts \
+            package/src/pool-cmd.ts \
+            package/src/pool-probe.ts \
+            package/src/pool.ts \
             package/src/seed.ts \
             package/src/session.ts \
+            package/src/sources.ts \
+            package/src/store.ts \
             package/src/tools.ts; do
             echo "$contents" | grep -qx "$required" || { echo "::error::$required missing from tarball"; exit 1; }
           done
