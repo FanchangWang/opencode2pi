@@ -78,18 +78,19 @@ describe('capability mapping (T1)', () => {
 			reasoning: true,
 			reasoning_options: [{ type: 'effort', values: ['low', 'high', 'bogus'] }],
 		})
-		// `Effort` is a host const enum, so the levels are compared as plain
-		// strings rather than importing an enum the host may not emit.
-		expect(config.thinking?.efforts?.join(',')).toBe('low,high')
+		// `efforts` is a plain validated string list, not a host enum, so the levels
+		// are compared as strings; each adapter projects it into its own spelling
+		// (`thinking.efforts` on omp, `thinkingLevelMap` on pi).
+		expect(config.efforts?.join(',')).toBe('low,high')
 	})
 
-	test('leaves thinking undefined when there is no effort axis', () => {
-		// A toggle model has no effort surface. Emitting an empty list would
-		// violate the host contract, and the host derives defaults from
-		// `reasoning: true` instead.
+	test('leaves the effort axis undefined when there is none', () => {
+		// A toggle model has no effort surface. An empty list would violate omp's
+		// contract, and pi would read it as "no effort supported" instead of
+		// deriving defaults from `reasoning: true`.
 		const { config } = normalizeEntry({ id: 't', reasoning: true, reasoning_options: [{ type: 'toggle' }] })
 		expect(config.reasoning).toBe(true)
-		expect(config.thinking).toBeUndefined()
+		expect(config.efforts).toBeUndefined()
 	})
 
 	test('applies the local mimo context override, and never silently', () => {

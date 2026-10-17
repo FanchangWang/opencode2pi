@@ -22,7 +22,7 @@
 
 import { readJson, writeJson } from './store.ts'
 
-import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
+import type { ModelSpec } from './host/contract.ts'
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from './metadata.ts'
 import { SEED_MODELS, VERIFIED_FREE } from './seed.ts'
@@ -168,7 +168,7 @@ async function fetchLiveModelIds(): Promise<{ ids: string[]; lane: LaneKey }> {
 }
 
 export interface DiscoveryResult {
-	readonly models: readonly ProviderModelConfig[]
+	readonly models: readonly ModelSpec[]
 	readonly diagnostics: readonly string[]
 }
 
@@ -202,7 +202,7 @@ export async function discoverFreeModels(): Promise<DiscoveryResult> {
 	const candidates = live ? live.ids : SEED_MODELS.map((model) => model.id)
 	if (live) diagnostics.push(`S1 anonymous /models (${live.lane} lane): ${live.ids.length} ids live`)
 
-	const models: ProviderModelConfig[] = []
+	const models: ModelSpec[] = []
 	const seen = new Set<string>()
 	for (const id of candidates) {
 		if (seen.has(id)) continue

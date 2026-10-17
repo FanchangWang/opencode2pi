@@ -17,7 +17,7 @@
  *            anonymous lane meters its quota per egress IP (src/pool-cmd.ts).
  */
 
-import type { ExtensionCommandContext, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
+import type { CommandUi, ModelSpec } from './host/contract.ts'
 
 import { discoverFreeModels } from './discovery.ts'
 import { runDoctor } from './doctor.ts'
@@ -59,7 +59,7 @@ const AGE = (record: HealthRecord): string => {
  * mark. `·` is not one of the five verdicts — it says we have not asked, which
  * is a fact about the last probe, not about the model.
  */
-function rosterLine(model: ProviderModelConfig, record: HealthRecord | undefined): string {
+function rosterLine(model: ModelSpec, record: HealthRecord | undefined): string {
 	if (!record) return `· ${model.id} — ${model.name} · 未探测`
 	const stale = isStale(record) ? '（已过期）' : ''
 	return `${HEALTH_MARK[record.health]} ${model.id} — ${model.name} · ${record.detail} · ${AGE(record)}${stale}`
@@ -71,7 +71,7 @@ function resultLine(result: ProbeResult, done: number, total: number): string {
 	return `[${done}/${total}] ${HEALTH_MARK[result.health]} ${result.modelId} — ${result.detail} · ${seconds}s`
 }
 
-async function currentRoster(): Promise<readonly ProviderModelConfig[]> {
+async function currentRoster(): Promise<readonly ModelSpec[]> {
 	// Never throws and never returns empty, so the roster is always showable.
 	const { models } = await discoverFreeModels()
 	return models.length > 0 ? models : SEED_MODELS
@@ -88,15 +88,15 @@ async function currentRoster(): Promise<readonly ProviderModelConfig[]> {
  * would delete every verdict a partial sweep deliberately left alone.
  */
 async function sweep(
-	models: readonly ProviderModelConfig[],
+	models: readonly ModelSpec[],
 	keep: ReadonlySet<string>,
-	ctx: ExtensionCommandContext,
+	ctx: CommandUi,
 ): Promise<HealthStore> {
 	const results = await probeAll(models, (done, total, result) => {
-		ctx.ui.setWorkingMessage(`正在探测 ${done}/${total}：${result.modelId}`)
-		ctx.ui.notify(resultLine(result, done, total))
+		ctx.setWorkingMessage(`正在探测 ${done}/${total}：${result.modelId}`)
+		ctx.notify(resultLine(result, done, total))
 	})
-	ctx.ui.setWorkingMessage()
+	ctx.setWorkingMessage()
 	const merged = await saveHealth(results, keep)
 	publishHealth(merged)
 	return merged
@@ -116,7 +116,7 @@ async function sweep(
  * age and one line pointing at `probe`. Re-probing on age would make `status` a
  * `probe` with extra steps.
  */
-async function showStatus(ctx: ExtensionCommandContext): Promise<void> {
+async function showStatus(ctx: CommandUi): Promise<void> {
 	const roster = await currentRoster()
 	const stored = await loadHealth()
 	publishHealth(stored)
@@ -130,20 +130,20 @@ async function showStatus(ctx: ExtensionCommandContext): Promise<void> {
 		if (!ctx.hasUI) {
 			// Print mode cannot render a progress indicator for minutes at a
 			// time; say so rather than hang a headless run on nothing.
-			ctx.ui.notify(
+			ctx.notify(
 				`有 ${unprobed.length} 个模型从未探测（${unprobed.map((model) => model.id).join(', ')}）。` +
 					'逐模型探测需要交互式 TUI，请在 TUI 里运行 status 或 probe。',
 				'warning',
 			)
 		} else {
-			ctx.ui.notify(
+			ctx.notify(
 				`正在探测 ${unprobed.length} 个尚未探测过的模型（${unprobed.map((model) => model.id).join(', ')}）…`,
 			)
 			merged = await sweep(unprobed, keep, ctx)
 		}
 	}
 
-	ctx.ui.notify(
+	ctx.notify(
 		`opencode2pi 模型状态：${summarizeHealth(roster, merged)}\n` +
 			`${roster.map((model) => rosterLine(model, merged[model.id])).join('\n')}` +
 			hiddenNote() +
@@ -161,21 +161,21 @@ function staleNote(aged: readonly string[]): string {
 }
 
 /** Probe the whole roster, report it, and ask about hiding. */
-async function runProbe(ctx: ExtensionCommandContext): Promise<void> {
+async function runProbe(ctx: CommandUi): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify('逐模型探测需要交互式 TUI（打印模式下不可用）。')
+		ctx.notify('逐模型探测需要交互式 TUI（打印模式下不可用）。')
 		return
 	}
 
 	const roster = await currentRoster()
 	const keep = new Set(roster.map((model) => model.id))
-	ctx.ui.notify(
+	ctx.notify(
 		`正在探测 ${roster.length} 个模型（每个模型一条结果，陆续输出；全部结束后给出汇总与完整列表）…`,
 	)
 	const merged = await sweep(roster, keep, ctx)
 	// The per-model lines stream in completion order; this closing block is the
 	// canonical snapshot — every model, in roster order, with verdict and reason.
-	ctx.ui.notify(
+	ctx.notify(
 		`探测完成：${summarizeHealth(roster, merged)}\n` +
 			`${roster.map((model) => rosterLine(model, merged[model.id])).join('\n')}` +
 			hiddenNote(),
@@ -198,12 +198,12 @@ function hiddenNote(): string {
  * be region-blocked on another, so an automatic rule would be wrong half the
  * time. Cancelling changes nothing — the default is to hide nothing.
  */
-async function chooseFilters(ctx: ExtensionCommandContext): Promise<void> {
+async function chooseFilters(ctx: CommandUi): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify('过滤设置需要交互式 TUI（打印模式下不可用）。')
+		ctx.notify('过滤设置需要交互式 TUI（打印模式下不可用）。')
 		return
 	}
-	const choice = await ctx.ui.select('opencode2pi · 模型过滤', [
+	const choice = await ctx.select('opencode2pi · 模型过滤', [
 		{ label: '全部保留（只标注，不隐藏）', description: '默认：任何模型都不从列表里移除' },
 		{ label: '隐藏地区封锁的', description: '上游按当前出口拒绝的模型（403 · not available in your country）' },
 		{ label: '隐藏所有探测失败的', description: '下线、地区封锁、请求被拒、上游故障；配额与链路问题不算' },
@@ -219,15 +219,15 @@ async function chooseFilters(ctx: ExtensionCommandContext): Promise<void> {
 	if (!next) return
 	await saveFilters(next)
 	publishFilters(next)
-	ctx.ui.notify(`已更新过滤：当前隐藏 ${hidden().size} 个模型（/model 与 --model 里不再出现）`)
+	ctx.notify(`已更新过滤：当前隐藏 ${hidden().size} 个模型（/model 与 --model 里不再出现）`)
 }
 
-async function showMenu(ctx: ExtensionCommandContext): Promise<void> {
+async function showMenu(ctx: CommandUi): Promise<void> {
 	if (!ctx.hasUI) {
-		ctx.ui.notify(USAGE)
+		ctx.notify(USAGE)
 		return
 	}
-	const choice = await ctx.ui.select('opencode2pi', [
+	const choice = await ctx.select('opencode2pi', [
 		{ label: 'doctor', description: '检查形状闸门是否仍然成立（发一个最小闸门形状请求）' },
 		{ label: 'status', description: '显示上次探测的结果；从未探测过的模型会自动补测' },
 		{ label: 'probe', description: '重新探测全部模型（并发，2 并发）' },
@@ -242,13 +242,21 @@ async function showMenu(ctx: ExtensionCommandContext): Promise<void> {
 	else if (choice === 'pool') await runPoolCommand(ctx)
 }
 
-async function runDoctorCommand(ctx: ExtensionCommandContext): Promise<void> {
-	if (ctx.hasUI) ctx.ui.notify('正在检查形状闸门…')
+async function runDoctorCommand(ctx: CommandUi): Promise<void> {
+	if (ctx.hasUI) ctx.notify('正在检查形状闸门…')
 	const report = await runDoctor(DOCTOR_MODEL)
-	ctx.ui.notify(`${report.headline}\n${report.detail}`, report.ok ? 'info' : 'error')
+	ctx.notify(`${report.headline}\n${report.detail}`, report.ok ? 'info' : 'error')
 }
 
-export async function handleCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+/**
+ * `/opencode2pi` — the single entry point, across both hosts.
+ *
+ * The host command context arrives as `unknown` and is wrapped by the adapter
+ * into the shared {@link CommandUi} port, so everything below is host-agnostic:
+ * `ctx.hasUI` and `ctx.*` read the same on pi and on omp even though
+ * `select` takes a different argument shape on each.
+ */
+export async function handleCommand(args: string, ctx: CommandUi): Promise<void> {
 	const sub = args.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
 	if (sub === 'doctor') return runDoctorCommand(ctx)
 	if (sub === 'status') return showStatus(ctx)
@@ -256,5 +264,5 @@ export async function handleCommand(args: string, ctx: ExtensionCommandContext):
 	if (sub === 'filter') return chooseFilters(ctx)
 	if (sub === 'pool') return runPoolCommand(ctx)
 	if (sub === '') return showMenu(ctx)
-	ctx.ui.notify(USAGE, 'warning')
+	ctx.notify(USAGE, 'warning')
 }

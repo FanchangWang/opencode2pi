@@ -1,5 +1,5 @@
 /**
- * opencode2pi — OpenCode Zen's anonymous free lane as an omp/pi provider.
+ * opencode2pi — OpenCode Zen's anonymous free lane as a pi/omp provider.
  *
  * The built-in `opencode-zen` provider requires a paid `OPENCODE_API_KEY`.
  * This extension needs none: the upstream gate is a request-shape check, not
@@ -22,266 +22,172 @@
  * so lane preference is registration-level: the legacy /zen/v1 lane is
  * registered first, and a shape rejection re-probes both lanes and
  * re-registers against the healthy one. The transport is a different story:
- * `options.fetch` IS honored, so a caller-supplied `init.proxy` picks the
+ * `options.fetch` IS honoured, so a caller-supplied `init.proxy` picks the
  * egress per request (FINDINGS §2.6).
  *
- * Integration seam (verified against omp 18.6.1 — see docs/FINDINGS.md):
- *   - `pi.registerProvider` config accepts `onPayload` / `prepareRequest`
- *     WITHOUT ERROR but NEVER CALLS THEM. Do not use them.
- *   - The working seam is `registerCustomApi(apiId, streamSimple, sourceId)`,
- *     which receives `(model, context, options)` — a structured context, not a
- *     serialized body. Shape the context, then delegate to the host engine
- *     with `model.api` swapped back to `openai-completions` to avoid recursion.
- *   - `toolChoice` lives on the *options* object, not on `Context`; setting it
- *     on the context is a silent no-op.
+ * ## Two hosts, one registration
+ *
+ * pi 1.3.0 and omp 18.11.3 both take a provider registration and both accept a
+ * custom streaming function in it, so this extension registers once and adapts
+ * the four places they genuinely differ — the context shape the handler
+ * receives, the presence of a logger, the `select` argument shape, and the
+ * per-model effort spelling. That adaptation lives in `src/host/`; see
+ * `src/host/contract.ts` for what differs and why, and `src/request.ts` for the
+ * request path both hosts share.
+ *
+ * Integration seam, re-verified against both hosts (docs/FINDINGS.md §3):
+ *   - `pi.registerProvider(name, { api, streamSimple })` is the ONLY portable
+ *     registration. omp's registry forwards it to `registerCustomApi`
+ *     internally; pi has no process-wide custom-API registry at all, so calling
+ *     `registerCustomApi` at module scope is what used to crash pi with
+ *     `(0, _piAi.registerCustomApi) is not a function`.
+ *   - The handler receives a structured context on omp (`systemPrompt`,
+ *     `messages`, `tools` as separate fields) and a *transcript* on pi, where
+ *     the prompt and tool declarations live in the leading system message. Both
+ *     are shaped, then delegated to the host engine with `model.api` swapped
+ *     back to `openai-completions` to avoid recursion.
+ *   - `toolChoice` lives on the *options* object on both hosts, not on the
+ *     context; setting it on the context is a silent no-op.
  */
-
-import { createAssistantMessageEventStream, registerCustomApi, streamSimple } from '@earendil-works/pi-ai'
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
-import type { ExtensionAPI, ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
 
 import { discoverFreeModels } from './discovery.ts'
 import { handleCommand } from './commands.ts'
-import { classifyUpstreamFailure, formatFailure } from './errors.ts'
 import { hidden, loadFilters, onHiddenChange, publishFilters, publishHealth } from './filters.ts'
 import { loadHealth } from './health.ts'
-import { activeCandidate, loadPool, poolEnabled, poolFetch, recordPassive } from './pool.ts'
-import { laneFor, type LaneKey } from './lanes.ts'
-import { findHealthyLane } from './gate.ts'
-import { currentLane, setCurrentLane } from './lanes.ts'
-import { PROCESS_SESSION, sessionForRequest } from './session.ts'
+import { activeCandidate, loadPool, poolEnabled } from './pool.ts'
+import { laneFor, currentLane } from './lanes.ts'
+import { onRepublishReady } from './request.ts'
+import { PROCESS_SESSION } from './session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from './seed.ts'
-
-const PROVIDER = 'opencode-zen-free'
-const API_ID = 'openai-completions-zen-free'
-const ANONYMOUS_KEY = 'public'
-const SOURCE_ID = 'opencode2pi'
-
-/** Project signal rendered into each lane's header shape (FINDINGS §2.5). */
-const PROJECT_ID = 'omp:default-project'
-
-/** The lane the provider is currently registered against (shared in lanes.ts). */
-let reapply: (() => void) | undefined
-let lastLaneSwitchAt = 0
-const LANE_SWITCH_COOLDOWN_MS = 60_000
-
-/** Re-register the provider against the lane currently believed healthy. */
-function republish(): void {
-	reapply?.()
-}
-
-/**
- * A shape rejection (403 FreeTierError) on `modelId` means the registered lane
- * may have stopped accepting our shape. Re-probe both lanes with the SAME model
- * — shape rejection is lane-level (errors.ts/health.ts classify it that way),
- * so the failing model is the correct probe target — and re-register against
- * the healthy one so the NEXT request takes the fallback. Cooldown prevents
- * oscillation when the upstream is flaky.
- */
-function scheduleLaneSwitch(modelId: string): void {
-	const now = Date.now()
-	if (now - lastLaneSwitchAt < LANE_SWITCH_COOLDOWN_MS) return
-	lastLaneSwitchAt = now
-	void (async () => {
-		const next = await findHealthyLane(modelId)
-		if (next !== null && next !== currentLane()) {
-			setCurrentLane(next)
-			log?.warn(`[${PROVIDER}] switching anonymous lane to ${next}`)
-			republish()
-		}
-	})()
-}
-
-/**
- * Replace a raw provider error with one that names the actual failure mode.
- *
- * `errorClassificationMessage` is preserved (and seeded from the original text
- * when absent) because that is the field the host's recovery logic reads; only
- * the human-facing `errorMessage` is rewritten. Without that split the
- * classification would be display-only but would also erase the host's own
- * retry decisions.
- */
-function explainFailure(modelId: string, message: AssistantMessage): AssistantMessage {
-	const original = message.errorMessage ?? ''
-	const classification = classifyUpstreamFailure(message.errorStatus, original)
-	return {
-		...message,
-		errorMessage: formatFailure(modelId, classification),
-		errorClassificationMessage: message.errorClassificationMessage ?? original,
-	}
-}
-
-let log: ExtensionAPI['logger'] | undefined
-let warnedMissingSession = false
-
-/**
- * Custom API handler: shapes the context, pins the conversation's session id,
- * classifies failures, then delegates the actual streaming to the host engine.
- */
-registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStreamOptions) => {
-	const incoming = options ?? {}
-	const lane = laneFor(currentLane())
-
-	const gated = lane.gateTools(context.tools ?? [])
-	// HostTool carries the same wire fields the host's own Tool objects do;
-	// the host Context type is generic over the schema, so bridge it here.
-	const gatedContext = { ...context, tools: gated.tools as Context['tools'] }
-	const forwarded: SimpleStreamOptions = gated.toolChoice ? { ...incoming, toolChoice: gated.toolChoice } : incoming
-
-	const session = sessionForRequest(options)
-	if (!session.derived && !warnedMissingSession) {
-		warnedMissingSession = true
-		log?.warn(
-			`[${PROVIDER}] host supplied no session identity; using process-level session ${session.id}`,
-		)
-	}
-
-	// The session headers ride on the model we hand the engine rather than on
-	// a wrapped `options.fetch`: `fetch` is optional, and a missing wrapper
-	// would silently drop the session header and fail the upstream gate with a
-	// bare 403. Merging onto the model's own headers also preserves whatever
-	// the host already resolved there.
-	const builtin: Model = {
-		...model,
-		api: 'openai-completions' as Model['api'],
-		headers: { ...model.headers, ...lane.sessionHeaders(session.id) },
-	}
-
-	// The exit pool rides on `options.fetch`, the seam the host demonstrably
-	// honours (FINDINGS §2.6): a caller-supplied `init.proxy` wins over the
-	// environment, which is what makes switching exits possible mid-session at
-	// all. `poolFetch` returns `undefined` while the pool is off, and then this
-	// spread adds no key — the request leaves exactly as it did before the
-	// feature existed, `PI_PROXY` and all.
-	const proxied = poolFetch(forwarded.fetch)
-	const upstream = streamSimple(builtin, gatedContext, proxied === undefined ? forwarded : { ...forwarded, fetch: proxied })
-
-	// Failures arrive as a stream *event*, not a rejected promise, so
-	// classification means forwarding the stream and rewriting that event.
-	const relayed = createAssistantMessageEventStream()
-	let sawShapeRejection = false
-	void (async () => {
-		try {
-			for await (const event of upstream) {
-				if (event.type === 'error') {
-					const kind = classifyUpstreamFailure(event.error.errorStatus, event.error.errorMessage ?? '').kind
-					if (kind === 'SHAPE_REJECTED') sawShapeRejection = true
-					// Attribute quota and geo refusals to the exit that produced
-					// them. This is the pool's only automatic act, and it is
-					// deliberately observation-only: rotating on failure is what
-					// this repo refuses to do.
-					if (kind === 'RATE_LIMIT' || kind === 'REGION_BLOCKED') await recordPassive(model.id, kind)
-					relayed.push(
-						{ ...event, error: explainFailure(model.id, event.error) },
-					)
-				} else {
-					relayed.push(event)
-				}
-			}
-			relayed.end(await upstream.result())
-		} catch (error) {
-			relayed.fail(error)
-		}
-		// Only after the stream has been forwarded: the current request is
-		// already answered with the rejection; the switch helps the NEXT one.
-		if (sawShapeRejection) scheduleLaneSwitch(model.id)
-	})()
-	return relayed
-}, SOURCE_ID)
+import { initProxyBackend, proxyBackend, proxyBackendNote } from './transport.ts'
+import {
+	API_ID,
+	PROJECT_ID,
+	PROVIDER,
+	type ExtensionApiLike,
+	type HostAdapter,
+	type ModelSpec,
+} from './host/contract.ts'
 
 /**
  * The catalog we publish. Starts as the seed — the only thing that can exist
  * before discovery — and is replaced by the discovered list once it lands.
  */
-let catalog: readonly ProviderModelConfig[] = SEED_MODELS
+let catalog: readonly ModelSpec[] = SEED_MODELS
 
 /**
  * Write the provider registry from the catalog minus what the user hid.
  *
  * This is the *only* place the model list is written, and it writes the whole
  * list every time: re-registering a provider name replaces its entire model
- * slice (host contract, `src/config/model-registry.ts`), which is what makes a
- * filter choice reach `/model` and `--model`.
+ * slice (host contract on both sides — omp `src/config/model-registry.ts`, pi
+ * `applyExtension` in `core/provider-composer.ts`), which is what makes a filter
+ * choice reach `/model` and `--model`.
  *
- * Discovery is ours to run, not the host's. Registering `fetchDynamicModels`
- * looked equivalent and is not: the host caches a dynamic result for 24 h
- * under a fingerprint of its *own* empty static list, so a warm cache never
- * calls the fetcher again, and a re-registration inside a session never re-runs
- * discovery — the models merged at startup stay in the registry no matter what
- * we filter. Both were measured: a hidden model came straight back after
- * `/opencode2pi filter`, and one that had never been in the seed survived.
+ * Discovery is ours to run, not the host's. Registering `refreshModels` /
+ * `fetchDynamicModels` looked equivalent and is not: the host caches a dynamic
+ * result under a fingerprint of its *own* empty static list, so a warm cache
+ * never calls the fetcher again, and a re-registration inside a session never
+ * re-runs discovery — the models merged at startup stay in the registry no
+ * matter what we filter. Both were measured: a hidden model came straight back
+ * after `/opencode2pi filter`, and one that had never been in the seed survived.
  */
-function applyProvider(pi: ExtensionAPI): void {
+function applyProvider(pi: ExtensionApiLike, adapter: HostAdapter): void {
 	const excluded = hidden()
 	const models = catalog.filter((model) => !excluded.has(model.id))
 	if (models.length === 0) {
 		// The host reads a provider with no models as a URL override and keeps the
 		// previous list, so a filter that hides everything would silently do
 		// nothing. Say so instead.
-		log?.warn(`[${PROVIDER}] 过滤规则隐藏了全部模型，模型列表不会缩小；用 /opencode2pi filter 放宽`)
+		adapter.diagnostics.warn(
+			`[${PROVIDER}] 过滤规则隐藏了全部模型，模型列表不会缩小；用 /opencode2pi filter 放宽`,
+		)
 	}
 
 	const lane = laneFor(currentLane())
-	pi.registerProvider(PROVIDER, {
-		baseUrl: lane.baseUrl,
-		api: API_ID,
-		apiKey: ANONYMOUS_KEY,
-		authHeader: true,
-		headers: lane.headers(PROJECT_ID),
-		models: [...models],
-	})
+	pi.registerProvider(PROVIDER, adapter.providerConfig(models, lane.baseUrl, lane.headers(PROJECT_ID)))
 }
 
 /** Re-discover the free lane and republish. A failure keeps what we have. */
-async function refreshCatalog(pi: ExtensionAPI): Promise<void> {
+async function refreshCatalog(pi: ExtensionApiLike, adapter: HostAdapter): Promise<void> {
 	const { models, diagnostics } = await discoverFreeModels()
-	for (const line of diagnostics) log?.info(`[${PROVIDER}] ${line}`)
+	for (const line of diagnostics) adapter.diagnostics.info(`[${PROVIDER}] ${line}`)
 	if (models.length === 0) return
 	catalog = models
-	applyProvider(pi)
+	applyProvider(pi, adapter)
 }
 
-export default async function (pi: ExtensionAPI): Promise<void> {
-	log = pi.logger
-	reapply = () => applyProvider(pi)
+/**
+ * Which host is loading this extension, and its adapter.
+ *
+ * Feature detection on the extension API object, not a version string: `pi.logger`
+ * exists on omp 18.11.3 and does not exist at all on pi 1.3.0 (grep for `logger`
+ * in pi's extension types returns nothing), so its presence is the one signal
+ * that separates them without hard-coding a version that will be wrong by the
+ * time anyone reads it. `pi` has no such property, so the check is a plain
+ * `'logger' in pi` rather than a comparison.
+ *
+ * The adapter is loaded with a dynamic import on purpose. A static import would
+ * pull BOTH adapters in on either host, and each one reads the other's runtime
+ * surface at module scope — which is exactly the kind of coupling that let the
+ * original `registerCustomApi` call crash pi. With this, omp never even loads
+ * `pi.ts`, so a divergence in one adapter cannot break the other host.
+ */
+async function detectAdapter(pi: ExtensionApiLike): Promise<HostAdapter> {
+	if ('logger' in pi && pi.logger !== undefined) {
+		const { ompAdapter } = await import('./host/omp.ts')
+		return ompAdapter(pi)
+	}
+	const { piAdapter } = await import('./host/pi.ts')
+	return piAdapter(pi)
+}
+
+export default async function (pi: ExtensionApiLike): Promise<void> {
+	const adapter = await detectAdapter(pi)
+	const reapply = () => applyProvider(pi, adapter)
+	onRepublishReady(reapply)
 
 	// The stored choices are part of what the roster is, so they are adopted
 	// before the first registration rather than applied on the next probe.
 	publishFilters(await loadFilters())
 	publishHealth(await loadHealth())
-	// The selected exit is part of the request path, so it is adopted before the
-	// first request can be made, not lazily on first use.
+	// How this runtime proxies a single request is resolved before the pool is
+	// adopted, because both the request path and the pool's own probes go through
+	// it and neither may start before it is known. Doing it after `loadPool()`
+	// would leave a window where a request could be sent direct while an exit is
+	// selected — the exact silent failure this ordering exists to prevent.
+	await initProxyBackend()
 	await loadPool()
-	onHiddenChange(() => reapply?.())
-	applyProvider(pi)
+	onHiddenChange(() => reapply())
+	applyProvider(pi, adapter)
 
 	// The host awaits extension factories and only then drains the registration
-	// queue (`extensibility/extensions/loader.ts`), so waiting here is what lets
-	// `--model provider/id` resolve an id that discovery found and the seed does
-	// not carry. The seed is already registered, so a discovery failure costs
-	// nothing but the wait — and that wait is the one the host imposed on itself
-	// back when it owned discovery.
-	await refreshCatalog(pi)
+	// queue, so waiting here is what lets `--model provider/id` resolve an id that
+	// discovery found and the seed does not carry. The seed is already registered,
+	// so a discovery failure costs nothing but the wait — and that wait is the one
+	// the host imposed on itself back when it owned discovery.
+	await refreshCatalog(pi, adapter)
 
 	pi.registerCommand('opencode2pi', {
 		description:
 			'opencode2pi 诊断：doctor 检查形状闸门，status 显示上次探测结果，probe 重新探测全部模型，filter 设置隐藏规则',
-		handler: handleCommand,
+		handler: (args, ctx) => handleCommand(args, adapter.ui(ctx)),
 	})
 
-	pi.logger.info(
-		`[${PROVIDER}] registered · process session ${PROCESS_SESSION} · seed ${SEED_MODELS.length} models · ` +
+	adapter.diagnostics.info(
+		`[${PROVIDER}] registered on ${adapter.name} · process session ${PROCESS_SESSION} · ` +
+			`seed ${SEED_MODELS.length} models · ` +
 			`verified-free ${Object.keys(VERIFIED_FREE).length} · known-rejected ${Object.keys(UNAVAILABLE).length} · ` +
 			`hidden ${hidden().size} · ` +
+			`per-request proxy ${proxyBackend()} (${proxyBackendNote()}) · ` +
 			(poolEnabled() ? `exit pool on (${activeCandidate()?.label ?? '未选中出口，直连'})` : 'exit pool off'),
 	)
 }
 
 export {
-	explainFailure,
-	PROVIDER,
 	API_ID,
-	SOURCE_ID,
+	PROJECT_ID,
+	PROVIDER,
 	PROCESS_SESSION,
 	SEED_MODELS,
 	UNAVAILABLE,

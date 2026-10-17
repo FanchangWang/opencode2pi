@@ -37,7 +37,7 @@
 
 import { createHash } from 'node:crypto'
 
-import type { SimpleStreamOptions } from '@earendil-works/pi-ai'
+import type { StreamOptions } from './host/contract.ts'
 
 const CANONICAL_SESSION = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 /**
@@ -112,7 +112,7 @@ export const PROCESS_SESSION = canonicalSessionID(`omp:${process.pid}:${new Date
  * mirrors into metadata, then the process constant. Returns null when nothing
  * usable is present so the caller can log the fallback rather than pretend.
  */
-function sessionSignal(options: SimpleStreamOptions | undefined): string | null {
+function sessionSignal(options: StreamOptions | undefined): string | null {
 	if (!options) return null
 
 	if ('sessionId' in options && typeof options.sessionId === 'string' && options.sessionId.length > 0) {
@@ -149,7 +149,7 @@ function sessionSignal(options: SimpleStreamOptions | undefined): string | null 
  * Canonical session id for this request, stable across every turn of one
  * conversation and distinct between conversations in the same process.
  */
-export function sessionForRequest(options: SimpleStreamOptions | undefined): {
+export function sessionForRequest(options: StreamOptions | undefined): {
 	readonly id: string
 	readonly derived: boolean
 } {

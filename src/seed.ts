@@ -18,10 +18,10 @@
  *     gets true capabilities instead of the silent fallback.
  */
 
-import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
+import type { ModelSpec } from './host/contract.ts'
 
 /** Ids verified end-to-end against the anonymous lane. */
-export const SEED_MODELS: readonly ProviderModelConfig[] = [
+export const SEED_MODELS: readonly ModelSpec[] = [
 	{
 		id: 'big-pickle',
 		name: 'big-pickle (free)',

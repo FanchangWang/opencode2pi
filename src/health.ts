@@ -20,7 +20,8 @@
  */
 
 import { readJson, writeJson } from './store.ts'
-import type { ProviderModelConfig } from '@oh-my-pi/pi-coding-agent'
+
+import type { ModelSpec } from './host/contract.ts'
 
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
 import { sendGateProbe } from './gate.ts'
@@ -168,7 +169,7 @@ async function probeModel(modelId: string): Promise<ProbeResult> {
 
 /** Probe every model with a bounded, paced worker pool, reporting progress as it goes. */
 export async function probeAll(
-	models: readonly ProviderModelConfig[],
+	models: readonly ModelSpec[],
 	onProgress?: (done: number, total: number, result: ProbeResult) => void,
 ): Promise<ProbeResult[]> {
 	const results: ProbeResult[] = []

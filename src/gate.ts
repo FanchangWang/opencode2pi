@@ -18,9 +18,34 @@
 
 import { canonicalSessionID } from './session.ts'
 import { LANES, laneFor, LANE_ORDER, type LaneKey } from './lanes.ts'
+import { proxiedFetch } from './transport.ts'
 
 const ANONYMOUS_KEY = 'public'
-const GATE_TIMEOUT_MS = 30_000
+
+/**
+ * One budget, and the reason there is only one.
+ *
+ * This used to carry a second, shorter cap on the tunnel stage — 10 s, then 6 s,
+ * on the reasoning that a proxy which cannot produce response headers inside it is
+ * not carrying traffic and there is nothing to gain from waiting. Measured on
+ * 2026-10-17, that reasoning was wrong in the expensive direction: of seven exits
+ * that had just screened clean, three returned HTTP 200 after 9.6 s, 10.4 s and
+ * 14.3 s, and all three were reported as `transport` failures. The 6 s cap did not
+ * separate dead exits from slow ones, because it was measuring the wrong stage.
+ *
+ * What the same measurement shows is that a dead proxy does not need a cap at all.
+ * Broken ones failed in 425 ms (`ECONNRESET`), 721 ms (bad certificate) and
+ * 1332 ms (`HTTP 403`, a verdict, not a hang). The only genuinely stuck case is a
+ * connect that never completes, and it burns the full budget either way. So the
+ * shorter cap bought nothing except turning working exits into dead-looking ones,
+ * and the total cap below already bounds the wait.
+ *
+ * The stage being timed is the upstream's first byte, not the tunnel: the same
+ * exits answered a trace to Cloudflare in 212–2736 ms while taking 9–14 s here.
+ * That latency is not a property of the proxy and not stable over time, so it
+ * cannot be budgeted against from the client side.
+ */
+const GATE_TOTAL_TIMEOUT_MS = 20_000
 
 export interface GateProbe {
 	readonly ok: boolean
@@ -64,20 +89,28 @@ export const GATE_CONDITIONS: readonly string[] = [
  * The session id is derived per call so repeated probes do not share upstream
  * cache affinity.
  *
- * `exit` routes this one request through a candidate proxy, using the very same
- * `init.proxy` the real path uses (pool.ts). Screening an exit with anything
- * other than the real request shape would answer a question nobody asked: the
- * pool exists because quota and geo blocks are per egress IP, so the only honest
- * measurement is the gate request itself, from that IP.
+ * `exit` routes this one request through a candidate proxy, on exactly the
+ * transport the real path uses (`transport.ts` via `poolFetch`). Screening an
+ * exit with anything other than the real request shape — or the real runtime
+ * mechanism — would answer a question nobody asked: the pool exists because
+ * quota and geo blocks are per egress IP, so the only honest measurement is the
+ * gate request itself, from that IP, over the code path that will carry it.
  */
 export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: string): Promise<GateProbe> {
 	const startedAt = Date.now()
 	const session = canonicalSessionID(`opencode2pi:gate:${modelId}:${startedAt}:${lane}`)
 	const shape = laneFor(lane)
 
+	// A candidate exit is judged on the whole request, tunnel included. There is no
+	// separate tunnel-stage cap: see GATE_TOTAL_TIMEOUT_MS for the measurement that
+	// removed it, and for why dead exits turn out not to need one.
+	const proxied = exit === undefined ? undefined : proxiedFetch(exit)
+	const via = proxied ?? globalThis.fetch
+	const signal = AbortSignal.timeout(GATE_TOTAL_TIMEOUT_MS)
+
 	let response: Response
 	try {
-		response = await fetch(`${shape.baseUrl}/chat/completions`, {
+		response = await via(`${shape.baseUrl}/chat/completions`, {
 			method: 'POST',
 			headers: {
 				...shape.headers('opencode2pi:default-project'),
@@ -93,9 +126,8 @@ export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: strin
 				messages: [{ role: 'user', content: 'Reply with OK.' }],
 				tools: gateTools(lane),
 			}),
-			signal: AbortSignal.timeout(GATE_TIMEOUT_MS),
-			...(exit === undefined ? {} : { proxy: exit }),
-		} as RequestInit)
+			signal,
+		})
 	} catch (error) {
 		return { ok: false, status: undefined, body: '', latencyMs: Date.now() - startedAt, transportError: String(error) }
 	}
