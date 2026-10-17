@@ -108,7 +108,7 @@ export async function sendGateProbe(modelId: string, lane: LaneKey): Promise<Gat
  * gate shape, or null when neither does. This is the lane-selection probe the
  * provider re-registration uses after a shape rejection.
  */
-export async function findHealthyLane(modelId = 'mimo-v2.6-flash-free'): Promise<LaneKey | null> {
+export async function findHealthyLane(modelId: string): Promise<LaneKey | null> {
 	for (const lane of LANE_ORDER) {
 		const probe = await sendGateProbe(modelId, lane)
 		if (probe.ok) return lane

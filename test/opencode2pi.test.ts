@@ -24,7 +24,7 @@ import {
 	type ProbeFilters,
 } from '../src/filters.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
-import { canonicalSessionID, clientProjectID, descendingTimePart, PROCESS_SESSION, sessionForRequest, sessionHeaders } from '../src/session.ts'
+import { canonicalSessionID, clientProjectID, descendingTimePart, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
 import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from '../src/tools.ts'
 import { LANES } from '../src/lanes.ts'
@@ -267,13 +267,17 @@ describe('session clock (upstream gate, 2026-10-15)', () => {
 		expect(re.slice('ses_'.length, 'ses_'.length + 12).slice(9, 12)).toBe('ffe')
 	})
 
-	test('session headers carry the full client fingerprint', () => {
+	test('inference lane session headers carry the full client fingerprint', () => {
 		// Dropping x-opencode-session-id makes the upstream 403 (FINDINGS
-		// §2.4), so every header must mirror the session id.
+		// §2.4), so every header must mirror the session id. Assert the
+		// inference lane's session headers — the shape the 2.x gate requires
+		// (FINDINGS §2.5) — rather than a stale copy in session.ts, so a future
+		// shape drift in lanes.ts is caught here instead of slipping past.
 		const session = 'ses_123456789ffeABCDEFGHIJKLMN'
-		const headers = sessionHeaders(session)
+		const headers = LANES.inference.sessionHeaders(session)
 		expect(headers['x-opencode-session']).toBe(session)
 		expect(headers['x-opencode-session-id']).toBe(session)
+		expect(headers['x-session-affinity']).toBe(session)
 		expect(headers['X-Session-Id']).toBe(session)
 	})
 

@@ -36,7 +36,7 @@ v1.4.1）：优先 legacy `/zen/v1`（v1.3.7 形状：单 read 工具、`prj_` p
 `opencode/1.18.31` UA、`x-opencode-request` 头），`/inference` 作 fallback
 （2.x 形状，4 会话头）。双通道形状中心在 `src/lanes.ts`：当前 lane 状态
 （`currentLane`/`setCurrentLane`）也在那里，health 探针与真实路径共用；
-请求 403 → `findHealthyLane()` 双通道探测 → 重注册（60s 冷却），因为
+请求 403 → `findHealthyLane(model.id)` 双通道探测 → 重注册（60s 冷却），因为
 `model.baseUrl` / `options.fetch` 在注册期后就不可改（FINDINGS §2.5）。
 `src/gate.ts` 的 `sendGateProbe(modelId, lane)` 按 lane 发同形探针，`doctor`
 与健康探测共用同一份。完整模型矩阵见 [`FINDINGS.md`](FINDINGS.md) §2。

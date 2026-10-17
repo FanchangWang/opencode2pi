@@ -159,22 +159,6 @@ export function sessionForRequest(options: SimpleStreamOptions | undefined): {
 }
 
 /**
- * Headers the upstream shape check and cache affinity both key on.
- *
- * The set mirrors the genuine OpenCode client (opencode2api v1.3.9): dropping
- * `x-opencode-session-id` or using a non-client project shape turns the request
- * into a 403 FreeTierError, so every header here is load-bearing.
- */
-export function sessionHeaders(sessionId: string): Record<string, string> {
-	return {
-		'x-opencode-session': sessionId,
-		'x-opencode-session-id': sessionId,
-		'x-session-affinity': sessionId,
-		'X-Session-Id': sessionId,
-	}
-}
-
-/**
  * Renders the project header the way the OpenCode client does: a bare
  * 40-character lowercase hex id rather than a `prj_`-prefixed one. The value
  * itself is not checked upstream, only its shape, but hashing keeps one

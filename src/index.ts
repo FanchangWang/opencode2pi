@@ -68,17 +68,19 @@ function republish(): void {
 }
 
 /**
- * A shape rejection (403 FreeTierError) means the registered lane may have
- * stopped accepting our shape. Re-probe both lanes and re-register against the
- * healthy one so the NEXT request takes the fallback. Cooldown prevents
+ * A shape rejection (403 FreeTierError) on `modelId` means the registered lane
+ * may have stopped accepting our shape. Re-probe both lanes with the SAME model
+ * — shape rejection is lane-level (errors.ts/health.ts classify it that way),
+ * so the failing model is the correct probe target — and re-register against
+ * the healthy one so the NEXT request takes the fallback. Cooldown prevents
  * oscillation when the upstream is flaky.
  */
-function scheduleLaneSwitch(): void {
+function scheduleLaneSwitch(modelId: string): void {
 	const now = Date.now()
 	if (now - lastLaneSwitchAt < LANE_SWITCH_COOLDOWN_MS) return
 	lastLaneSwitchAt = now
 	void (async () => {
-		const next = await findHealthyLane()
+		const next = await findHealthyLane(modelId)
 		if (next !== null && next !== currentLane()) {
 			setCurrentLane(next)
 			log?.warn(`[${PROVIDER}] switching anonymous lane to ${next}`)
@@ -168,7 +170,7 @@ registerCustomApi(API_ID, (model: Model, context: Context, options?: SimpleStrea
 		}
 		// Only after the stream has been forwarded: the current request is
 		// already answered with the rejection; the switch helps the NEXT one.
-		if (sawShapeRejection) scheduleLaneSwitch()
+		if (sawShapeRejection) scheduleLaneSwitch(model.id)
 	})()
 	return relayed
 }, SOURCE_ID)

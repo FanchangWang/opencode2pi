@@ -79,9 +79,11 @@ jobs:
             package/src/gate.ts \
             package/src/health.ts \
             package/src/host.d.ts \
+            package/src/lanes.ts \
             package/src/metadata.ts \
             package/src/seed.ts \
-            package/src/session.ts; do
+            package/src/session.ts \
+            package/src/tools.ts; do
             echo "$contents" | grep -qx "$required" || { echo "::error::$required missing from tarball"; exit 1; }
           done
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"

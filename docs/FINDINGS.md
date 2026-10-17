@@ -181,7 +181,7 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 
 - **`model.baseUrl` 与 `options.fetch` 均不生效**：注册期 URL 一旦固定，
   运行期改不了（用「注册错误 URL + handler 覆盖」实测返回 404）。
-  fallback 只能靠「403 FreeTierError → `findHealthyLane()` 双通道探测 →
+  fallback 只能靠「403 FreeTierError → `findHealthyLane(model.id)` 双通道探测 →
   `setCurrentLane()` + 重新注册 provider」完成，60s 冷却（
   `LANE_SWITCH_COOLDOWN_MS`）防振荡。
 - legacy 通道**只要求单 `read` 工具，定义不校验**；注入 stub 时不能
@@ -214,7 +214,7 @@ registerCustomApi(apiId: string, streamSimple: Fn, sourceId: string, stream?: Fn
 - `context` 是**结构化对象**（`systemPrompt` / `messages` / `tools` / `toolChoice`），**不是序列化 body**。所以闸门要加在 `context.tools` 上，而不是改 JSON 字符串。
 - 委托宿主引擎时必须把 `model.api` 换回 `'openai-completions'`，否则会递归回自己的 handler。
 
-工作实现见 `src/index.ts` 的 `registerCustomApi(...)` 与 `withGateTools(...)`。
+工作实现见 `src/index.ts` 的 `registerCustomApi(...)`；双通道形状（含 `gateTools`）集中在 `src/lanes.ts` 的 `LANES`。
 
 ### 3.3 omp 内置的 pi-ai 是 1.x，API 面与 opencode2dsh 依赖的不同
 

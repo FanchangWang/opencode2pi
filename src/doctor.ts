@@ -15,7 +15,7 @@
 
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
 import { GATE_CONDITIONS, sendGateProbe } from './gate.ts'
-import { LANE_ORDER, laneFor } from './lanes.ts'
+import { LANE_ORDER, laneFor, currentLane } from './lanes.ts'
 
 export interface DoctorReport {
 	readonly ok: boolean
@@ -44,7 +44,7 @@ export async function runDoctor(modelId: string): Promise<DoctorReport> {
 			kind: 'OK',
 			modelId,
 			headline: `✅ 闸门正常（${modelId}，${healthy.lane} lane ${healthy.probe.latencyMs}ms）`,
-			detail: `两条通道探测结果：\n${summary}\n当前注册在 ${healthy.lane} lane。`,
+			detail: `两条通道探测结果：\n${summary}\n已注册 lane = ${currentLane()}；探针通过 lane = ${healthy.lane}。`,
 			latencyMs: healthy.probe.latencyMs,
 		}
 	}
