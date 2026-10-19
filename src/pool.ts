@@ -139,10 +139,10 @@ export type ExitGrade = 'S' | 'A' | 'B' | 'C'
  */
 export type GateVerdict = 'ok' | 'limited' | 'region' | 'shape' | 'transport' | 'inconclusive'
 
-/** A 429 or a geo block seen for one model on one exit. Keyed by model: see §4.4.1. */
+/** A 429, a geo block, or a broken stream seen for one model on one exit. Keyed by model: see §4.4.1. */
 export interface ModelMark {
 	readonly at: number
-	readonly kind: 'limited' | 'region'
+	readonly kind: 'limited' | 'region' | 'transport'
 }
 
 export interface ScreenEvidence {
@@ -196,7 +196,7 @@ export interface CompletionEvidence {
 /** A real request that failed through the active exit, as observed on the request path. */
 export interface PassiveFailure {
 	readonly at: number
-	readonly kind: 'limited' | 'region'
+	readonly kind: 'limited' | 'region' | 'transport'
 }
 
 /**
@@ -421,7 +421,11 @@ function narrowCompletion(value: unknown): CompletionEvidence | undefined {
 function narrowFailure(value: unknown): PassiveFailure | undefined {
 	if (typeof value !== 'object' || value === null) return undefined
 	const record = value as Partial<PassiveFailure>
-	if (typeof record.at !== 'number' || (record.kind !== 'limited' && record.kind !== 'region')) return undefined
+	if (
+		typeof record.at !== 'number' ||
+		(record.kind !== 'limited' && record.kind !== 'region' && record.kind !== 'transport')
+	)
+		return undefined
 	return { at: record.at, kind: record.kind }
 }
 
@@ -940,13 +944,23 @@ export async function pruneUnverified(): Promise<number> {
  * request, no retry, no behaviour change — it means the next `/opencode2pi pool`
  * shows what actually happened instead of a screen result that has stopped
  * describing the exit.
+ *
+ * `TRANSPORT` covers a stream that broke after the response headers arrived. The
+ * host has already retried the underlying transport (~28 times in 120 s, §2.6),
+ * so reaching here means the exit really did not carry the turn; without the
+ * mark it would keep its ✅ from an earlier completion while failing every new
+ * one. A user abort is filtered by the caller, not here: this function records
+ * only failures another part of the code has already decided belong to the exit.
  */
-export async function recordPassive(modelId: string, kind: 'RATE_LIMIT' | 'REGION_BLOCKED'): Promise<void> {
+export async function recordPassive(
+	modelId: string,
+	kind: 'RATE_LIMIT' | 'REGION_BLOCKED' | 'TRANSPORT',
+): Promise<void> {
 	const exit = active
 	if (!exit) return
 	const evidence = ensureEvidence(exit.key)
 	if (!evidence) return
-	const mark = kind === 'RATE_LIMIT' ? 'limited' : 'region'
+	const mark = kind === 'RATE_LIMIT' ? 'limited' : kind === 'REGION_BLOCKED' ? 'region' : 'transport'
 	store = {
 		...store,
 		evidence: {

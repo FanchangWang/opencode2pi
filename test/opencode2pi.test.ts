@@ -110,6 +110,22 @@ describe('capability mapping (T1)', () => {
 		expect(notes.join(' ')).toContain('200000 → 1048576')
 	})
 
+	test('applies the local deepseek-v4.1 context override without widening its twin bucket', () => {
+		// models.dev gives the free id 200000 while its paid twin declares
+		// 1000000; a live needle probe recalled at 1,011,668 prompt tokens
+		// (opencode2dsh #81). Only contextWindow changes; maxTokens stays 32000.
+		const free = normalizeEntry({ id: 'deepseek-v4.1-flash-free', limit: { context: 200_000, output: 32_000 } })
+		expect(free.config.contextWindow).toBe(1_048_576)
+		expect(free.config.maxTokens).toBe(32_000)
+		expect(free.notes.join(' ')).toContain('200000 → 1048576')
+
+		// Another model in the same 200000 bucket has no live measurement, so
+		// the feed still speaks unchanged: the override is per id, not per bucket.
+		const control = normalizeEntry({ id: 'glm-5.3-flash-free', limit: { context: 200_000, output: 32_000 } })
+		expect(control.config.contextWindow).toBe(200_000)
+		expect(control.notes.join(' ')).not.toContain('override')
+	})
+
 	test('the override stops firing once the feed publishes the corrected value', () => {
 		// Values match → no note. The entry is not deleted; it stays as a
 		// regression guard should the feed drift back to 200000.

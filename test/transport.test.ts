@@ -35,6 +35,7 @@ import {
 	proxiedFetch,
 	proxyBackend,
 	proxyBackendNote,
+	type ProxyAgentOptions,
 	type UndiciLike,
 } from '../src/transport.ts'
 
@@ -43,15 +44,15 @@ const EXIT = 'http://192.0.2.10:8080'
 /** Records what actually reached the transport, keyed by mechanism. */
 function recordingUndici() {
 	const calls: { url: string; init: RequestInit }[] = []
-	const built: string[] = []
+	const built: (string | ProxyAgentOptions)[] = []
 	const copy: UndiciLike = {
 		fetch: (async (input: string | URL | Request, init?: RequestInit) => {
 			calls.push({ url: String(input), init: init ?? {} })
 			return new Response('{}')
 		}) as UndiciLike['fetch'],
 		ProxyAgent: class {
-			constructor(url: string) {
-				built.push(url)
+			constructor(options: string | ProxyAgentOptions) {
+				built.push(options)
 			}
 			async close(): Promise<void> {}
 		},
@@ -122,6 +123,25 @@ describe('the undici mechanism (the Node half)', () => {
 
 		expect(baseCalls).toEqual([])
 		expect(calls).toHaveLength(1)
+	})
+
+	test('disables TLS verification on an https exit, and only there', async () => {
+		// Published free-list `https://host:port` exits routinely present
+		// self-signed certificates. undici otherwise refuses the proxy hop before
+		// sending CONNECT, and a working tunnel is judged dead. The plain-http
+		// path must keep the string form so nothing else changes.
+		const https = 'https://192.0.2.88:8443'
+		const { copy, built } = recordingUndici()
+		const wrapped = makeProxiedFetch({ kind: 'undici', undici: copy }, https)
+		await wrapped?.('https://opencode.ai/a')
+		expect(built).toEqual([{ uri: https, proxyTls: { rejectUnauthorized: false } }])
+		await disposeProxyAgents()
+
+		const { copy: plain, built: plainBuilt } = recordingUndici()
+		const http = 'http://192.0.2.89:8080'
+		await makeProxiedFetch({ kind: 'undici', undici: plain }, http)?.('https://opencode.ai/a')
+		expect(plainBuilt).toEqual([http])
+		await disposeProxyAgents()
 	})
 
 	test('reuses one agent per exit instead of one per request', async () => {

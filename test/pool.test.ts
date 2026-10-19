@@ -514,7 +514,7 @@ describe('the transport wrapper', () => {
 		expect(seen.map((entry) => entry.proxy)).toEqual([EXIT, undefined, undefined, undefined])
 	})
 
-	test('attributes an observed quota failure to the active exit, and to nobody when closed', async () => {
+	test('attributes observed quota, region and transport failures to the active exit, and to nobody when closed', async () => {
 		await selectExit(candidates()[0]?.key ?? '')
 		await recordPassive('model-a', 'RATE_LIMIT')
 		expect(evidenceFor(exitKey(EXIT))?.modelMarks).toBeUndefined()
@@ -522,9 +522,11 @@ describe('the transport wrapper', () => {
 		await setPoolEnabled(true)
 		await recordPassive('model-a', 'RATE_LIMIT')
 		await recordPassive('model-b', 'REGION_BLOCKED')
+		await recordPassive('model-c', 'TRANSPORT')
 		const marks = evidenceFor(exitKey(EXIT))?.modelMarks
 		expect(marks?.['model-a']?.kind).toBe('limited')
 		expect(marks?.['model-b']?.kind).toBe('region')
+		expect(marks?.['model-c']?.kind).toBe('transport')
 		expect(LIMIT_TTL_MS).toBeLessThan(EXIT_TTL_MS)
 	})
 })

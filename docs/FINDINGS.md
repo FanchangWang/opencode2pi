@@ -94,6 +94,15 @@ models.dev 声明 `limit.context: 200000`，opencode2dsh 用模型卡把它覆�
 models.dev 仍以 0 价发布，纯靠元数据判定会继续把死模型端上选择器 ——
 `UNAVAILABLE` denylist 是唯一挡住它的机制，所以下线必须手工登记。
 
+**`deepseek-v4.1-flash-free` 的上下文窗口同理，2026-10-19 合并上游 #81**：
+models.dev 给同一 canonical 模型的免费与付费两个 id 写了不同的窗口 —— 免费 id
+写 `limit.context: 200000`，付费 `deepseek-v4.1-flash` 写 1000000。上游在免费
+通道上用 needle-in-a-haystack 实测到 **1,011,668 prompt tokens 仍能正确召回**，
+所以取 1048576，而不是照抄付费 id。只覆盖 `contextWindow`，`maxTokens` 保持
+models.dev 的 32000。`LOCAL_MODEL_OVERRIDES` 按 id 生效，同桶的
+`glm-5.3-flash-free` 仍是 200000 —— 测试同时钉住这两点，避免以后把覆盖写成
+「凡 200000 就放宽」。
+
 denylist 的 id 拼写必须逐字来自 `/models`：`nemotron-3.ultra-free`（点）
 曾长期挂在 `UNAVAILABLE` 里，而线上真实 id 是 `nemotron-3-ultra-free`（连字符），
 于是这条 denylist 一直是静默空转，401 的死模型照旧出现在选择器上。
@@ -260,6 +269,28 @@ undici 的来源按序尝试（实测）：先 `import('undici')`，再用
 `createRequire(process.argv[1])` 从**宿主自己的入口脚本**向上解析 ——
 pi 自带 undici 8.10.2，且是 `@earendil-works/pi-coding-agent` 的**直接**依赖，
 实测可解析。同时声明为 optional peerDependency，只提示不强求。
+
+**`https://` 出口的代理跳必须关掉证书校验（2026-10-19 合并上游 `6c9802e`）**：
+内置免费源里有一批 `https://host:port` 地址，它们的证书是自签的或者对不上
+主机名。undici 的 `ProxyAgent` 默认会在**发 CONNECT 之前**校验代理这一跳，
+于是地址被判死 —— 而隧道本身可能完全可用。Bun 的 `init.proxy` 与 Node 的
+`ProxyAgent({ proxyTls: { rejectUnauthorized: false } })` 都按同一规则处理；
+预筛（`prefilter.ts` 的 `tlsConnect`）也必须关，否则预筛与真实请求会对同一个
+地址给出相反结论。**关掉的只是到代理的这一跳**；通过隧道打到
+`cloudflare.com` / `opencode.ai` 的 TLS 仍由各自的客户端正常校验。
+
+测试钉两点：自签证书的本地 TLS 代理在预筛中是**通过**（修复前是
+`DEPTH_ZERO_SELF_SIGNED_CERT`）；`http://` 出口仍以字符串形式交给
+`ProxyAgent`，不受这次改动影响。
+
+**流在响应头之后断掉必须记账（2026-10-19 合并上游 `2baeb87`）**：闸门 200 与完成
+探测都只覆盖一次短请求。共享代理完全可能在拿到 200、吐出几个 token 后断流，
+而旧的 ✅ 仍会保留到 TTL 结束，于是菜单把一个每个新回合都失败的出口标成可用。
+请求路径的 `catch` 现在把它记为 `transport`（`recordPassive`），与 429/地区拒绝
+共用 `lastFailure`/`modelMarks` 语义：`isVerified` 立即失效，菜单显示「流中断」。
+**只在 `poolFetch` 真的返回了 wrapper 时记**——池没开或运行时无代理机制时请求是
+直连的，记到选中的出口上就是伪造观测。用户主动取消（错误名含 `Abort`）也不记。
+仍然只记账、不自动换出口。
 
 顺带确认一件事，因为它决定了要不要写两条路：**pi 无论用哪种方式安装，
 内部都是 Node。** 它的 `dist/bundle/cli.js` shebang 是 `#!/usr/bin/env node`

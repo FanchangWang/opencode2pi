@@ -269,13 +269,20 @@ omp 的 registry 会在内部转发到 `registerCustomApi`
 `init.proxy` 是 Bun 的扩展字段，Node 的 undici 会**静默忽略**它 —— 不报错，只是
 照直连发出去。Node 上要用 undici 的 `ProxyAgent`，且必须连 `fetch` 一起换
 （dispatcher 只与构造它的那份 undici 配套，否则 `TypeError: fetch failed`）。
+`https://` 出口还要给 `ProxyAgent` 传 `proxyTls.rejectUnauthorized: false`：
+免费列表里的自签证书会让 undici 在 CONNECT 之前就拒绝整条隧道，而预筛
+（`prefilter.ts`）必须做同一个选择，否则两边对同一地址的结论会相反
+（`FINDINGS.md` §2.7）。关掉的只是代理跳；隧道内的目标证书照常校验。
 取不到机制时 `poolFetch` 返回 `undefined` 并由请求路径**明确警告一次**；
 在线路上「池在工作」和「池是摆设」是无法区分的，所以这条静默路径必须堵死。
 
 **为什么不做自动轮换**：宿主对传输层失败会重试（实测 120s 内 28 次，§2.6），在这一层再
 加一次「失败就换」等于把量级乘起来，而匿名通道正是靠请求量记账的。所以真实请求失败时
 只做一件事：在**它经过的那个出口**上按模型记一笔（`recordPassive`），下次打开 `pool`
-能看到实际发生了什么。换不换由用户点。opencode2dsh 的自动轮换是另一套设计，不要抄。
+能看到实际发生了什么 —— 429、地区拒绝，以及**响应头之后断掉的流**（`transport`）。
+最后一种闸门与完成探测都看不到，不记的话旧 ✅ 会一直留到 TTL 结束。池关闭或运行时
+没有代理机制时请求走直连，不做任何记账；用户主动取消也不记。换不换由用户点。
+opencode2dsh 的自动轮换是另一套设计，不要抄。
 
 **跨会话的开关会在每次启动时提醒一次**（`src/index.ts` 的 `session_start`）：
 池的开关和选中出口都持久化，用户很容易第二天忘了请求还在走代理。两个宿主都在 TUI

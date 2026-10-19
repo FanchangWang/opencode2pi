@@ -103,7 +103,19 @@ export function prefilterExit(proxyUrl: string, timeoutMs = PREFILTER_TIMEOUT_MS
 	try {
 		opening =
 			url.protocol === 'https:'
-				? tlsConnect({ host, port, ...(isIP(host) === 0 ? { servername: host } : {}) })
+				? tlsConnect({
+						host,
+						port,
+						// The hop to the proxy only. Published `https://host:port`
+						// exits routinely carry self-signed certificates; verifying
+						// them here would judge a working tunnel dead, and the real
+						// request path disables exactly the same check for the same
+						// address (transport.ts `proxyTls`). The `CONNECT` this
+						// socket then requests is unchanged, and the TLS session the
+						// screen opens *through* the tunnel verifies the target.
+						rejectUnauthorized: false,
+						...(isIP(host) === 0 ? { servername: host } : {}),
+					})
 				: netConnect({ host, port })
 	} catch (error) {
 		finish({ ok: false, error: String(error) })

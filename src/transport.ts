@@ -69,7 +69,22 @@ export type ProxyBackend = 'unresolved' | 'bun' | 'undici' | 'none'
 /** The slice of undici this file uses. Structural so it needs no dependency. */
 export interface UndiciLike {
 	readonly fetch: FetchLike
-	readonly ProxyAgent: new (url: string) => DispatcherLike
+	readonly ProxyAgent: new (options: string | ProxyAgentOptions) => DispatcherLike
+}
+
+/**
+ * ProxyAgent options, narrowed to the two fields this file sets.
+ *
+ * `proxyTls` is undici's separate TLS configuration for the *proxy hop*. It has
+ * to be disabled in practice: the published free lists carry `https://host:port`
+ * entries with self-signed certificates, and Node rejects those before CONNECT —
+ * so the address is judged dead even though the tunnel would work. Only the hop
+ * to the proxy is unverified; the tunnelled `CONNECT` still speaks TLS to the
+ * target through the proxy and verifies *that* certificate normally.
+ */
+export interface ProxyAgentOptions {
+	readonly uri: string
+	readonly proxyTls?: { readonly rejectUnauthorized?: boolean }
 }
 
 interface DispatcherLike {
@@ -188,7 +203,14 @@ const agents = new Map<string, DispatcherLike>()
 function agentFor(copy: UndiciLike, url: string): DispatcherLike {
 	const existing = agents.get(url)
 	if (existing) return existing
-	const created = new copy.ProxyAgent(url)
+	// An `https:` proxy needs its own TLS verification turned off. Free-list
+	// entries commonly present self-signed certificates, and undici refuses the
+	// hop before it ever sends CONNECT; the same addresses are then screened out
+	// (prefilter.ts makes the identical choice). Plain `http:` proxies keep the
+	// string form, so no unnecessary options object reaches undici.
+	const created = url.startsWith('https:')
+		? new copy.ProxyAgent({ uri: url, proxyTls: { rejectUnauthorized: false } })
+		: new copy.ProxyAgent(url)
 	agents.set(url, created)
 	// `Map.delete` answers whether the key was there, not what it held, so the
 	// evicted agent has to be read before it goes.

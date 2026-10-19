@@ -71,6 +71,7 @@ import {
 	type ExitCandidate,
 	type ExitEvidence,
 	type GateVerdict,
+	type ModelMark,
 } from './pool.ts'
 import {
 	discoverExit,
@@ -147,9 +148,12 @@ function completionText(completion: ExitEvidence['completion']): string {
 function markText(evidence: ExitEvidence): string {
 	const marks = Object.entries(evidence.modelMarks ?? {}).filter(([, mark]) => isFresh(mark.at, LIMIT_TTL_MS))
 	if (marks.length === 0) return ''
-	const rendered = marks.map(
-		([model, mark]) => `${model} ${mark.kind === 'limited' ? '429 限流' : '地区拒绝'}（${ageText(mark.at)}）`,
-	)
+	const label: Record<ModelMark['kind'], string> = {
+		limited: '429 限流',
+		region: '地区拒绝',
+		transport: '流中断',
+	}
+	const rendered = marks.map(([model, mark]) => `${model} ${label[mark.kind]}（${ageText(mark.at)}）`)
 	return `最近：${rendered.join('；')}`
 }
 

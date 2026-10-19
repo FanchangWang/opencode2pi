@@ -35,15 +35,28 @@ export const DEFAULT_MAX_TOKENS = 16_384
  * `mimo-v2.6-flash-free` is the measured case: the feed declares
  * `limit.context: 200000`, while the MiMo model card and the official OpenCode
  * CLI config both use 1048576 (opencode2dsh 0.3.11 LOCAL_MODEL_OVERRIDES, issue
- * #56 metadata note). Applied in {@link normalizeEntry}; once the feed itself
- * publishes the corrected value the values match and the entry stops firing —
- * it stays as a regression guard rather than being deleted. Every application
- * is recorded in the notes so the override is never silent.
+ * #56 metadata note).
+ *
+ * `deepseek-v4.1-flash-free` is the same shape from opencode2dsh 0.3.13 (#81):
+ * models.dev gives the free and paid twins of one canonical model different
+ * windows — the free id says 200000 while `deepseek-v4.1-flash` says 1000000.
+ * Needle-in-a-haystack probes of the live free lane recalled correctly at
+ * 1,011,668 prompt tokens, so 1048576 is measured, not copied from the paid
+ * entry. Only `contextWindow` is overridden; `maxTokens` keeps the feed's 32000.
+ *
+ * Applied in {@link normalizeEntry}; once the feed itself publishes the
+ * corrected value the values match and the entry stops firing — it stays as a
+ * regression guard rather than being deleted. Every application is recorded in
+ * the notes so the override is never silent.
  */
 const LOCAL_MODEL_OVERRIDES: Readonly<Record<string, { readonly contextWindow: number; readonly reason: string }>> = {
 	'mimo-v2.6-flash-free': {
 		contextWindow: 1_048_576,
 		reason: 'MiMo model card and official CLI config declare 1048576; models.dev publishes 200000',
+	},
+	'deepseek-v4.1-flash-free': {
+		contextWindow: 1_048_576,
+		reason: 'paid twin declares 1000000 and the free lane recalled a needle at 1,011,668 tokens; models.dev publishes 200000',
 	},
 }
 

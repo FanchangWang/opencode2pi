@@ -183,6 +183,17 @@ export function createStreamHandler(engine: StreamEngine): StreamHandler {
 				}
 				relayed.end(await upstream.result())
 			} catch (error) {
+				// A stream that breaks after its headers landed is the failure a
+				// gate probe cannot see: the exit accepted CONNECT, the response
+				// started, then the turn died. Record it against the exit so an
+				// earlier ✅ stops outliving the next real request (§4.7).
+				//
+				// Only when the pool actually carried this request: with `proxied`
+				// undefined the request went direct, and blaming the selected exit
+				// would be a fabricated observation. A user abort is not the exit's
+				// failure; the host names it with an `Abort`-bearing error.
+				const aborted = error instanceof Error && error.name.toLowerCase().includes('abort')
+				if (proxied !== undefined && !aborted) await recordPassive(model.id, 'TRANSPORT')
 				engine.abort(relayed, error)
 			}
 			// Only after the stream has been forwarded: the current request is already
