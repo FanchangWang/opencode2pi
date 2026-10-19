@@ -35,7 +35,7 @@
  * forwarded, because a wrong layout 403s.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
 import type { StreamOptions } from './host/contract.ts'
 
@@ -160,10 +160,93 @@ export function sessionForRequest(options: StreamOptions | undefined): {
 
 /**
  * Renders the project header the way the OpenCode client does: a bare
- * 40-character lowercase hex id rather than a `prj_`-prefixed one. The value
- * itself is not checked upstream, only its shape, but hashing keeps one
- * conversation pinned to one project (opencode2api #70/#83).
+ * 40-character lowercase hex id rather than a `prj_`-prefixed one. Both lanes
+ * take this shape (opencode2api v1.4.2: the 1.x client reports the project's
+ * git root commit, and a project that is not a git checkout is hashed into the
+ * same shape). The value itself is not checked upstream, only its shape, but
+ * hashing keeps one conversation pinned to one project.
  */
 export function clientProjectID(project: string): string {
 	return createHash('sha256').update(`opencode-project\x00${project}`).digest('hex').slice(0, 40)
+}
+
+/**
+ * The user message id the 1.x client reports as `x-opencode-request`, in the
+ * official `Identifier.ascending()` layout: `msg_` + 12 hex time characters +
+ * 14 Base62. Unlike the session's descending layout, the clock here is a real
+ * wall clock with a per-millisecond counter, exactly like the client that
+ * mints it, so the encoding needs no reinterpretation.
+ *
+ * Exported for the regression test; the request path uses
+ * {@link messageIDForRequest}, which pins one id per user turn.
+ */
+export function ascendingMessageID(now = Date.now()): string {
+	const ms = BigInt(Math.trunc(now))
+	const counter = ascendingCounter(now)
+	// The official layout carries a 36-bit millisecond clock: 12 hex characters
+	// are 48 bits, 12 of which are the counter. The clock's top bits are
+	// truncated exactly as the client's own encoder truncates them.
+	const value = ((ms << 12n) | counter) & 0xffffffffffffn
+	const timePart = value.toString(16).padStart(12, '0')
+	const randomPart = base62Fixed(BigInt(`0x${randomBytes(16).toString('hex')}`), 14)
+	return `msg_${timePart}${randomPart}`
+}
+
+let lastAscendingMs = 0
+let ascendingCount = 0
+
+/** Per-millisecond counter, wrapped into the 12 low bits the layout provides. */
+function ascendingCounter(now: number): bigint {
+	const ms = Math.trunc(now)
+	if (ms !== lastAscendingMs) {
+		lastAscendingMs = ms
+		ascendingCount = 0
+	}
+	ascendingCount = (ascendingCount + 1) & 0xfff
+	return BigInt(ascendingCount === 0 ? 1 : ascendingCount)
+}
+
+/**
+ * One message id per (session, user turn), replaying on every request of that
+ * turn: the client mints the id when the user sends a message and repeats it
+ * through the agent loop's tool steps. Minting one per request would look like
+ * a new user message on every tool call.
+ *
+ * The memo is a FIFO capped at 1024 entries: an id is only needed while its
+ * turn is in flight, and unbounded growth is the one state worth bounding.
+ */
+const MESSAGE_MEMO_LIMIT = 1024
+const messageMemo = new Map<string, string>()
+
+export function messageIDForRequest(sessionId: string, turn: string | undefined): string {
+	const key = `${sessionId}\x00${turn ?? ''}`
+	const memoized = messageMemo.get(key)
+	if (memoized !== undefined) return memoized
+	if (messageMemo.size >= MESSAGE_MEMO_LIMIT) {
+		const oldest = messageMemo.keys().next()
+		if (!oldest.done) messageMemo.delete(oldest.value)
+	}
+	const id = ascendingMessageID()
+	messageMemo.set(key, id)
+	return id
+}
+
+/**
+ * Identity of the user turn this request belongs to: the number of user
+ * messages in the host transcript. Tool results are separate messages on both
+ * hosts (role `toolResult`), so every tool step of one turn resolves to the
+ * same key and keeps its message id stable, while the next user turn gets a
+ * new one.
+ *
+ * The count alone is enough because both hosts replay the whole transcript on
+ * every request; hashing the message content would copy and digest it on every
+ * tool step to distinguish a case the host cannot produce.
+ */
+export function userTurnKey(messages: readonly unknown[]): string | undefined {
+	let count = 0
+	for (const message of messages) {
+		if (typeof message !== 'object' || message === null || !('role' in message)) continue
+		if (message.role === 'user') count += 1
+	}
+	return count === 0 ? undefined : String(count)
 }

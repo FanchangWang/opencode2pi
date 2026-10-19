@@ -72,6 +72,7 @@ function normalizeContext(raw: unknown): NormalizedContext {
 	const tools = (context.tools ?? []) as readonly Tool[]
 	return {
 		tools: tools as readonly HostTool[],
+		messages: (context.messages ?? []) as readonly unknown[],
 		withTools: (next) => ({ ...context, tools: next as Tool[] }),
 	}
 }

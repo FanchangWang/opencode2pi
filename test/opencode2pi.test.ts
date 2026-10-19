@@ -24,7 +24,16 @@ import {
 	type ProbeFilters,
 } from '../src/filters.ts'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, isFreeModel, normalizeEntry, type ModelsDevEntry } from '../src/metadata.ts'
-import { canonicalSessionID, clientProjectID, descendingTimePart, PROCESS_SESSION, sessionForRequest } from '../src/session.ts'
+import {
+	ascendingMessageID,
+	canonicalSessionID,
+	clientProjectID,
+	descendingTimePart,
+	messageIDForRequest,
+	PROCESS_SESSION,
+	sessionForRequest,
+	userTurnKey,
+} from '../src/session.ts'
 import { SEED_MODELS, UNAVAILABLE, VERIFIED_FREE } from '../src/seed.ts'
 import { gateTool, GATE_TOOL_NAMES, OPENCODE_TOOLS } from '../src/tools.ts'
 import { LANES } from '../src/lanes.ts'
@@ -283,8 +292,9 @@ describe('session clock (upstream gate, 2026-10-15)', () => {
 	})
 
 	test('clientProjectID renders a bare 40-hex project id', () => {
-		// The prj_ prefix is rejected upstream; a bare 40-char lowercase hex
-		// is what the client sends (FINDINGS §2.4).
+		// Both lanes send the bare 40-char lowercase hex the client reports
+		// (the 1.x client uses the git root commit; anything else is hashed
+		// into the same shape). opencode2api v1.4.2, FINDINGS §2.8.
 		const id = clientProjectID('omp:default-project')
 		expect(id).toMatch(/^[0-9a-f]{40}$/)
 		expect(id.startsWith('prj_')).toBe(false)
@@ -346,21 +356,38 @@ describe('anonymous lanes (dual-channel, 2026-10-17)', () => {
 
 	test('lane headers differ per origin', () => {
 		const legacy = LANES.legacy.headers('omp:default-project')
-		expect(legacy['x-opencode-project']).toMatch(/^prj_[0-9a-f]{24}$/)
-		expect(legacy['user-agent']).toMatch(/^opencode\/1\.18\.31/)
+		expect(legacy['x-opencode-project']).toMatch(/^[0-9a-f]{40}$/)
+		expect(legacy['user-agent']).toBe('opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14')
 		const inference = LANES.inference.headers('omp:default-project')
 		expect(inference['x-opencode-project']).toMatch(/^[0-9a-f]{40}$/)
-		expect(inference['user-agent']).toBe('opencode/latest/2.0.29/cli')
+		expect(inference['user-agent']).toBe('opencode/latest/2.0.32/cli')
 	})
 
-	test('legacy session headers omit x-opencode-session-id and carry x-opencode-request', () => {
+	test('legacy session headers carry a msg_ request id and no affinity headers', () => {
 		const session = 'ses_123456789ffeABCDEFGHIJKLMN'
 		const legacy = LANES.legacy.sessionHeaders(session)
-		expect(legacy['x-opencode-session-id']).toBeUndefined()
-		expect(legacy['x-opencode-request']).toMatch(/^req_[0-9a-f]{16}$/)
+		expect(legacy['x-opencode-session']).toBe(session)
+		expect(legacy['x-opencode-session-id']).toBe(session)
+		expect(legacy['x-opencode-request']).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+		expect(legacy['x-session-affinity']).toBeUndefined()
+		expect(legacy['X-Session-Id']).toBeUndefined()
 		const inference = LANES.inference.sessionHeaders(session)
 		expect(inference['x-opencode-session-id']).toBe(session)
 		expect(inference['x-opencode-request']).toBeUndefined()
+	})
+
+	test('x-opencode-request is one msg_ id per user turn, replayed through a tool loop', () => {
+		const session = 'ses_123456789ffeABCDEFGHIJKLMN'
+		const turn = userTurnKey([{ role: 'user' }, { role: 'assistant' }, { role: 'toolResult' }])
+		const second = userTurnKey([{ role: 'user' }, { role: 'assistant' }, { role: 'toolResult' }, { role: 'user' }])
+		expect(turn).toBe('1')
+		expect(second).toBe('2')
+		const first = messageIDForRequest(session, turn)
+		expect(first).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+		expect(messageIDForRequest(session, turn)).toBe(first)
+		expect(messageIDForRequest(session, second)).not.toBe(first)
+		expect(messageIDForRequest('ses_123456789ffeZYXWVUTSRQPONM', turn)).not.toBe(first)
+		expect(ascendingMessageID()).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
 	})
 })
 

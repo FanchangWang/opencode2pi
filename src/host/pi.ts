@@ -110,6 +110,7 @@ function normalizeContext(raw: unknown): NormalizedContext {
 	const messages = ((raw as TranscriptContext | undefined)?.messages ?? []) as readonly TranscriptMessage[]
 	return {
 		tools: getCurrentTools(messages) as readonly HostTool[],
+		messages: messages as readonly unknown[],
 		withTools: (tools) => {
 			// Collapse first so the prompt text and the tool state are resolved
 			// exactly the way the engine would resolve them, then replace the tool

@@ -160,6 +160,12 @@ export interface StreamModel {
  */
 export interface NormalizedContext {
 	readonly tools: readonly HostTool[]
+	/**
+	 * The host transcript, narrowed to the little the shared layer reads: the
+	 * `role` of each message, to key the per-turn message id. Both hosts hand
+	 * over their native message array; nothing here parses message content.
+	 */
+	readonly messages: readonly unknown[]
 	/** Rebuild the context for the host engine with these tools substituted. */
 	readonly withTools: (tools: readonly HostTool[]) => unknown
 }

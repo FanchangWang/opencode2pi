@@ -268,6 +268,48 @@ pi 自带 undici 8.10.2，且是 `@earendil-works/pi-coding-agent` 的**直接**
 自建包实测：`#!/usr/bin/env node` 的 shim 拉起 node；改成 `#!/usr/bin/env bun`
 则尝试拉 bun 并失败。所以判断依据只能是运行时本身，不能是宿主名或安装方式。
 
+### 2.8 上游 2026-10-18 更新：形状漂移与 Bun 运行时伪装（2026-10-19 同步）
+
+opencode2api `a9470df..d04ff33`（7 个 commit，v1.4.2）带来两类变化：**请求形状
+向官方客户端再收紧一档**，以及**传输层伪装成 Bun**。本地逐项实测如下。
+
+**形状（必须同步，已合并）**：
+
+| 项 | 同步前 | 新（opencode2api v1.4.2） |
+| --- | --- | --- |
+| `/inference` UA | `opencode/latest/2.0.29/cli` | `opencode/latest/2.0.32/cli` |
+| `/inference` 的 `shell` 定义 | `Commands run on Windows using powershell.` | `Commands run on Linux using bash.`（官方 2.0.32 客户端自己的定义） |
+| legacy UA | `opencode/1.18.31 (win32 x64; node…)` | `opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14` |
+| legacy project | `prj_<24hex>` | 裸 40-hex（1.x 客户端上报 git root commit；非 git 项目哈希成同形） |
+| legacy 会话头 | `x-opencode-session` + `req_<16hex>` + 两个 affinity 头 | `x-opencode-session` + `x-opencode-session-id` + `x-opencode-request: msg_<12hex><14base62>`，**不发** affinity 头 |
+
+`x-opencode-request` 是**用户消息 id**（官方 `Identifier.ascending()` 布局），
+一轮用户消息内所有 tool step 复用同一个 id，新的一轮才换。本仓库按会话 + 用户
+消息条数 memo（FIFO 1024），见 `session.ts` 的 `messageIDForRequest`。
+
+实测（2026-10-19，Bun 1.4.3 直连）：新旧两套形状**都能拿 200**（旧形状仍被
+兼容），因此本次同步是**消除可识别的偏差**，不是修复一个已复现的 403。但
+`/inference` 的 shell 定义属于「上游校验定义」的那一半闸门，旧 Windows 描述
+随时可能变成 403，必须跟。
+
+**传输层（只记录，不合并）**：`d04ff33` 给网关加了 `httpx.BunTransport`
+（uTLS 复刻 Bun 1.4.3 的 BoringSSL ClientHello：JA4 `t13d1713h1`、
+X25519MLKEM768、ALPN 只有 `http/1.1`；再按 Bun fetch 的头顺序/大小写重排
+HTTP/1.1；支持 gzip/deflate/br/zstd 增量解 SSE）。理由是官方 1.x/2.x 客户端
+都跑在 Bun 上，而 Go 的 `net/http` ClientHello、HTTP/2 与头顺序都不像 Bun。
+
+对本项目的含义分两半，**都不要现在实现**：
+
+- **omp 跑在 Bun 上**，TLS 与头顺序天然就是 Bun 的（本机 Bun 1.4.3 正是
+  上游抓包用的版本），无需干预。
+- **pi 跑在 Node 上**，ClientHello 来自 OpenSSL、头顺序来自 undici。实测
+  （2026-10-19，Node 24.20）：同一份 v1/v2 形状在 Node 上也是 **200**，
+  说明闸门**目前不校验 TLS/头顺序**。这是预防性伪装，不是已发生的拒绝。
+  若将来出现「Bun 上 200、Node 上裸 403」，先怀疑这一项；Node 复刻
+  BoringSSL ClientHello 需要原生依赖，不应预先引入。
+
+---
+
 ## 3. omp 扩展 API 的实测行为
 
 ### 3.1 `pi.registerProvider` 的 `onPayload` / `prepareRequest` 是哑字段

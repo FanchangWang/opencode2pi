@@ -32,9 +32,12 @@ stream:true  + 无 tools             →  403
 
 2026-10-14 起匿名通道迁至 `/inference`、工具名 `bash` → `shell` 且校验定义
 （stub 403），见 FINDINGS §2.4；**2026-10-17 上游恢复双通道**（opencode2api
-v1.4.1）：优先 legacy `/zen/v1`（v1.3.7 形状：单 read 工具、`prj_` project、
-`opencode/1.18.31` UA、`x-opencode-request` 头），`/inference` 作 fallback
-（2.x 形状，4 会话头）。双通道形状中心在 `src/lanes.ts`：当前 lane 状态
+v1.4.1）：优先 legacy `/zen/v1`，`/inference` 作 fallback。**2026-10-19 同步
+opencode2api v1.4.2**（FINDINGS §2.8）：legacy 改发 1.19.3 形状（单 read 工具、
+裸 40-hex project、`opencode/1.19.3 ai-sdk/.../runtime/bun/1.3.14` UA、两个
+会话头 + `msg_` 形状的 `x-opencode-request`），`/inference` 改发 2.0.32 形状
+（UA `opencode/latest/2.0.32/cli`，shell 定义换成官方 Linux/bash 版）。双通道
+形状中心在 `src/lanes.ts`：当前 lane 状态
 （`currentLane`/`setCurrentLane`）也在那里，health 探针与真实路径共用；
 请求 403 → `findHealthyLane(model.id)` 双通道探测 → 重注册（60s 冷却），因为
 `model.baseUrl` / `options.fetch` 在注册期后就不可改（FINDINGS §2.5）。

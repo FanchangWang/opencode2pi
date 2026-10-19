@@ -4,14 +4,17 @@
  * Upstream serves the keyless lane on two origins that gate DIFFERENT shapes
  * (docs/FINDINGS.md §2.4/§2.5, opencode2api v1.4.1):
  *
- *   legacy /zen/v1       pre-2.x OpenCode 1.18.x shape: legacy User-Agent,
- *                        x-opencode-request, canonical prj_* project id, and a
- *                        single "read" tool is enough (definitions are NOT
- *                        validated; a stub passes). Preferred first.
+ *   legacy /zen/v1       pre-2.x OpenCode shape (synced 2026-10-19 with the
+ *                        1.19.3 client): `opencode/1.19.3` AI-SDK User-Agent,
+ *                        x-opencode-request carrying a `msg_` ascending id,
+ *                        bare 40-hex project id, and a single "read" tool is
+ *                        enough (definitions are NOT validated; a stub
+ *                        passes). Preferred first.
  *
- *   /inference           OpenCode 2.x shape: opencode/latest/2.0.29/cli UA,
- *                        bare 40-hex project id, four session headers, and
- *                        shell+read with GENUINE definitions (stubs 403).
+ *   /inference           OpenCode 2.x shape (synced 2026-10-19 with 2.0.32):
+ *                        opencode/latest/2.0.32/cli UA, bare 40-hex project
+ *                        id, four session headers, and shell+read with GENUINE
+ *                        definitions (stubs 403).
  *
  * The host engine resolves the request URL from the provider registration,
  * so lane switching is registration-level: this extension registers the
@@ -19,9 +22,7 @@
  * FreeTierError), which is why both shapes are constructed here.
  */
 
-import { randomBytes, createHash } from 'node:crypto'
-
-import { clientProjectID } from './session.ts'
+import { clientProjectID, messageIDForRequest } from './session.ts'
 import { gateTool, OPENCODE_TOOLS } from './tools.ts'
 
 export const LEGACY_BASE = 'https://opencode.ai/zen/v1'
@@ -36,7 +37,7 @@ export interface AnonymousLane {
 	/** Registration-level static headers (UA, client, project). */
 	readonly headers: (project: string) => Record<string, string>
 	/** Per-request headers that vary with the conversation session id. */
-	readonly sessionHeaders: (sessionId: string) => Record<string, string>
+	readonly sessionHeaders: (sessionId: string, messageId?: string) => Record<string, string>
 	/** Normalize the tools the host declared into the wire shape this lane gates. */
 	readonly gateTools: (declared: readonly HostTool[]) => { tools: HostTool[]; toolChoice?: 'none' }
 }
@@ -47,15 +48,15 @@ export interface HostTool {
 	parameters?: unknown
 }
 
-/** Pre-2.x User-Agent, matching upstream's v1.3.7 shape (FINDINGS §2.5). */
-function legacyUserAgent(): string {
-	return `opencode/1.18.31 (${process.platform} ${process.arch}; node${process.versions.node})`
-}
-
-/** Canonical prj_<24hex> project id accepted by the legacy origin. */
-function legacyProjectID(project: string): string {
-	return 'prj_' + createHash('sha256').update(project).digest('hex').slice(0, 24)
-}
+/**
+ * OpenCode 1.x User-Agent for a model request, as captured from 1.19.3: the
+ * client's own `opencode/<version>` plus the AI SDK provider-utils version of
+ * the package serving Chat Completions (this extension always delegates to the
+ * host's `openai-completions` engine) and the Bun runtime the client ships.
+ * The old `(<os> <arch>; node…)` suffix was this extension's own runtime and
+ * no real client sends it.
+ */
+const LEGACY_USER_AGENT = 'opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14'
 
 /** The single tool name the legacy /zen/v1 gate requires; descriptions are not checked. */
 const LEGACY_READ_STUB: HostTool = {
@@ -109,15 +110,16 @@ export const LANES: Readonly<Record<LaneKey, AnonymousLane>> = {
 		key: 'legacy',
 		baseUrl: LEGACY_BASE,
 		headers: (project) => ({
-			'user-agent': legacyUserAgent(),
+			'user-agent': LEGACY_USER_AGENT,
 			'x-opencode-client': 'cli',
-			'x-opencode-project': legacyProjectID(project),
+			'x-opencode-project': clientProjectID(project),
 		}),
-		sessionHeaders: (sessionId) => ({
+		// The 1.x client sends both session headers, the user message id as
+		// x-opencode-request, and no affinity headers (opencode2api v1.4.2).
+		sessionHeaders: (sessionId, messageId = messageIDForRequest(sessionId, undefined)) => ({
 			'x-opencode-session': sessionId,
-			'x-opencode-request': `req_${randomBytes(8).toString('hex')}`,
-			'x-session-affinity': sessionId,
-			'X-Session-Id': sessionId,
+			'x-opencode-session-id': sessionId,
+			'x-opencode-request': messageId,
 		}),
 		gateTools: legacyGateTools,
 	},
@@ -125,7 +127,7 @@ export const LANES: Readonly<Record<LaneKey, AnonymousLane>> = {
 		key: 'inference',
 		baseUrl: INFERENCE_BASE,
 		headers: (project) => ({
-			'user-agent': 'opencode/latest/2.0.29/cli',
+			'user-agent': 'opencode/latest/2.0.32/cli',
 			'x-opencode-client': 'cli',
 			'x-opencode-project': clientProjectID(project),
 		}),

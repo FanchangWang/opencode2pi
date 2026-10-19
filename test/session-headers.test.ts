@@ -50,7 +50,7 @@ function captureDispatch(): {
 	const captured: { options?: Record<string, unknown>; model?: StreamModel } = {}
 	const engine: StreamEngine = {
 		diagnostics: { info: () => {}, warn: () => {} },
-		normalizeContext: () => ({ tools: [], withTools: () => ({}) }),
+		normalizeContext: () => ({ tools: [], messages: [], withTools: () => ({}) }),
 		explainFailure: (_id, error) => error,
 		createStream: () => ({
 			push: () => {},
@@ -132,7 +132,7 @@ describe('session headers survive the host (regression, pi 2026-10-17)', () => {
 		// options layer is what actually carries the fix.
 		expect(modelHeaders['x-opencode-session']).toMatch(CANONICAL_SESSION)
 		expect(optionHeaders['x-opencode-session']).toMatch(CANONICAL_SESSION)
-		expect(optionHeaders['x-opencode-request']).toMatch(/^req_[0-9a-f]{16}$/)
+		expect(optionHeaders['x-opencode-request']).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
 	})
 
 	test('the provider id stays off the wire as a header', () => {

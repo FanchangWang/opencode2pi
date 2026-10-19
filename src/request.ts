@@ -17,7 +17,7 @@ import { classifyUpstreamFailure } from './errors.ts'
 import { findHealthyLane } from './gate.ts'
 import { currentLane, laneFor, setCurrentLane } from './lanes.ts'
 import { activeCandidate, poolFetch, recordPassive } from './pool.ts'
-import { sessionForRequest } from './session.ts'
+import { messageIDForRequest, sessionForRequest, userTurnKey } from './session.ts'
 import { proxyBackendNote } from './transport.ts'
 import {
 	BUILTIN_API,
@@ -99,7 +99,10 @@ export function createStreamHandler(engine: StreamEngine): StreamHandler {
 		//
 		// `api` is swapped back to the built-in engine, which is what stops the
 		// delegation from re-entering this handler.
-		const sessionHeaders = lane.sessionHeaders(session.id)
+		const sessionHeaders = lane.sessionHeaders(
+			session.id,
+			messageIDForRequest(session.id, userTurnKey(normalized.messages)),
+		)
 		const builtin: StreamModel = {
 			...model,
 			api: BUILTIN_API,

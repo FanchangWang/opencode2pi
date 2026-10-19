@@ -1,7 +1,9 @@
 /**
  * Genuine OpenCode tool definitions (description + JSON schema) captured from
  * the official client, ported from opencode2api
- * (internal/gateway/opencode_tools.json, v1.3.9).
+ * (internal/gateway/opencode_tools.json; synced 2026-10-19 with the shape the
+ * 2.x gate validates for OpenCode 2.0.32, whose shell description is the Linux
+ * `bash` one even when the client runs elsewhere).
  *
  * Why these exist: the Zen free tier validates the DEFINITION of every tool
  * whose name it recognises, and a synthesised stub — even one carrying the
@@ -20,7 +22,7 @@ export interface ToolDefinition {
 
 export const OPENCODE_TOOLS: Readonly<Record<string, ToolDefinition>> = {
 	"shell": 	{
-	  "description": "Execute a shell command and return its output. Commands run on Windows using powershell. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+	  "description": "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
 	  "parameters": {
 	    "additionalProperties": false,
 	    "properties": {
