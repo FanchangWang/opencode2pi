@@ -8,7 +8,7 @@
  * route. So this file offers choices, measures them, and applies exactly what was
  * chosen — it never rotates on its own (src/pool.ts explains why).
  *
- * Five items, because the menu is where a user decides, and a menu that lists
+ * Eight items, because the menu is where a user decides, and a menu that lists
  * every internal step makes them do the ordering themselves:
  *
  * · **开启/关闭出口池** — off means every request goes out exactly as the host
@@ -18,11 +18,18 @@
  *   an enabled pool with nothing selected is the one state that silently spends
  *   the machine's own quota.
  * · **选择自定义出口** — the user's own proxies, one row each, named by position.
- *   Selecting one runs a gate probe before switching.
- * · **删除自定义出口** — removes a line from `exits.txt`.
- * · **自动选择内置出口池** — find a working free exit. One command because the two
+ *   Selecting one shows a fresh completion if there is one, otherwise measures a
+ *   gate probe and a real answer before switching.
+ * · **选择内置出口** — the exits a scan has already admitted, so the result of a
+ *   scan can be chosen later instead of only at the moment it was found. A fresh
+ *   completion is reused; stale or partial evidence is re-measured first, for the
+ *   same reason the custom path is.
+ * · **自动扫描内置出口池** — find working free exits. One command because the two
  *   halves are one decision: fetching and screening only says a proxy carries TLS,
  *   so "补充完" and "选哪个" are a single question with a single answer.
+ * · **删除自定义出口** — removes a line from `exits.txt`.
+ * · **设置免费源** — enable or disable one built-in list.
+ * · **清空内置结果** — delete discovered exits and their evidence.
  * · **查看当前状态** — prints the pool and its evidence, changes nothing.
  *
  * There is deliberately no "re-screen everything" item: screening is free and runs
@@ -43,11 +50,15 @@ import {
 	addCandidate,
 	activeCandidate,
 	candidates,
+	clearBuiltinExits,
+	disabledSources,
 	evidenceFor,
 	EXIT_TTL_MS,
 	hasUsable,
+	hasVerified,
 	isFresh,
 	isUsable,
+	isVerified,
 	LIMIT_TTL_MS,
 	poolEnabled,
 	quarantinedEntries,
@@ -56,28 +67,28 @@ import {
 	selectExit,
 	selectedKey,
 	setPoolEnabled,
+	setSourceDisabled,
 	type ExitCandidate,
 	type ExitEvidence,
 	type GateVerdict,
 } from './pool.ts'
 import {
 	discoverExit,
-	gateTestExit,
+	COMPLETION_MARK,
 	GATE_MARK,
 	groupHuntFailures,
 	huntPlan,
 	huntUsableExit,
 	probeWorthyCandidates,
-	type HuntAttempt,
+	SCAN_MODEL,
+	SCAN_TARGET,
+	verifyExit,
 	type HuntProgress,
 } from './pool-probe.ts'
 import { redactAddress } from './exits.ts'
+import { FREE_SOURCES } from './sources.ts'
 import { dataDir } from './store.ts'
-import { SEED_MODELS } from './seed.ts'
 import { proxyBackend, proxyBackendNote } from './transport.ts'
-
-/** Model used for the pool's gate test: a verified id, not whatever is selected. */
-const GATE_MODEL = SEED_MODELS[0]?.id ?? 'big-pickle'
 
 const TIER_LABEL: Readonly<Record<ExitCandidate['tier'], string>> = { manual: '手动', builtin: '内置' }
 
@@ -111,6 +122,21 @@ function gateText(gate: ExitEvidence['gate']): string {
 }
 
 /**
+ * What a full turn through the exit said.
+ *
+ * Kept separate from {@link gateText} because the two are the pool's two rungs,
+ * and a row that shows only the gate is the row that made a ✅ mean "the request
+ * shape was accepted" — which is not what the user is buying. A missing line
+ * means the stage has not run, not that it passed.
+ */
+function completionText(completion: ExitEvidence['completion']): string {
+	if (!completion) return ''
+	const status = completion.status === undefined ? '' : ` HTTP ${completion.status}`
+	const stale = isFresh(completion.at, EXIT_TTL_MS) ? '' : '（已过期）'
+	return `完成 ${COMPLETION_MARK[completion.verdict]}${status} · ${ageText(completion.at)}${stale}`
+}
+
+/**
  * What this exit has actually been told.
  *
  * A screen says the proxy carries traffic; these marks say what the upstream
@@ -135,11 +161,14 @@ function candidateLine(index: number, candidate: ExitCandidate, selected: boolea
 		screenText(evidence?.screen),
 		gateText(evidence?.gate),
 	]
+	const completion = completionText(evidence?.completion)
+	if (completion !== '') parts.push(completion)
 	const mark = evidence ? markText(evidence) : ''
 	// "No evidence" is not the same verdict as "refused": the gate line already
 	// carries the refusal marks, so this only marks the unmeasured case.
-	const note = isUsable(evidence) ? '' : ' · 尚无可用证据'
-	return `${parts.filter((part) => part !== '').join(' · ')}${note}${mark === '' ? '' : `\n      ${mark}`}`
+	const usable = isUsable(evidence) ? '' : ' · 尚无可用证据'
+	const verified = evidence !== undefined && isVerified(evidence) ? '' : ' · 未完成验证'
+	return `${parts.filter((part) => part !== '').join(' · ')}${usable || verified}${mark === '' ? '' : `\n      ${mark}`}`
 }
 
 /**
@@ -176,13 +205,14 @@ export function poolReport(): string {
 	const list = candidates()
 	const active = activeCandidate()
 	const usable = list.filter((candidate) => isUsable(evidenceFor(candidate.key))).length
+	const verified = list.filter((candidate) => isVerified(evidenceFor(candidate.key))).length
 	const state = poolEnabled()
 		? `开 · 出口 = ${active?.label ?? `未选中（直连本机 IP）`}`
 		: '关 · 直连本机 IP'
 	const header = `opencode2pi 出口池：${state}`
 	if (list.length === 0) {
 		return (
-			`${header}\n没有可用出口：手动添加，或选「自动选择内置出口池」。` +
+			`${header}\n没有可用出口：手动添加，或选「自动扫描内置出口池」。` +
 			`\n（手动出口写在 ${dataDir()}/exits.txt，一行一个。）` +
 			quarantineNote() +
 			refusalNote()
@@ -191,7 +221,7 @@ export function poolReport(): string {
 	const lines = list.map((candidate, index) => candidateLine(index, candidate, candidate.key === active?.key))
 	const advice = hasUsable()
 		? ''
-		: '\n⚠️ 目前没有任何出口处于可用状态：先「自动选择内置出口池」拉一批并实测。'
+		: '\n⚠️ 目前没有任何出口处于可用状态：先「自动扫描内置出口池」拉一批并实测。'
 	// Stated here as well as in the startup note because this is the screen where
 	// the user decides to trust an exit. A pool that cannot proxy is worse than no
 	// pool: the menu would show an exit as selected while every request left from
@@ -203,7 +233,7 @@ export function poolReport(): string {
 				? '\n⚠️ 代理机制尚未初始化：出口池不可用，重启会话后再试。'
 				: ''
 	return (
-		`${header}\n出口 ${list.length} 个（可用 ${usable} 个）：\n${lines.join('\n')}\n` +
+		`${header}\n出口 ${list.length} 个（可用 ${usable} 个，已完成验证 ${verified} 个）：\n${lines.join('\n')}\n` +
 		`逐请求代理机制：${proxyBackend()}（${proxyBackendNote()}）\n` +
 		`数据目录：${dataDir()}（pool.json 是开关与选择，exits.txt 是你的出口列表）。池关闭时请求完全按原样发出（本机 IP / PI_PROXY）。` +
 		quarantineNote() +
@@ -241,11 +271,70 @@ function slotLabel(index: number): string {
 	return `自定义池 ${index + 1}`
 }
 
-/** Ask, then measure, then ask again — the switch is never silent. */
+/**
+ * Scanned exits that still have usable evidence.
+ *
+ * Only admitted built-ins can appear here, and admission already requires a
+ * completed answer — this filter is about *now*: a screen or completion record
+ * that aged out, or a later failure, takes the row away. The scan's results stay
+ * selectable after the command that found them, which is the whole point: the
+ * moment a scan ends used to be the only chance to take one of its exits.
+ */
+function usableBuiltinSlots(): readonly ExitCandidate[] {
+	return candidates().filter(
+		(candidate) => candidate.tier === 'builtin' && isUsable(evidenceFor(candidate.key)),
+	)
+}
+
+/** Rows for a built-in selection menu: position, address, and the evidence it has. */
+function builtinOptions(slots: readonly ExitCandidate[]): readonly { label: string; description: string }[] {
+	return slots.map((candidate, index) => {
+		const evidence = evidenceFor(candidate.key)
+		const verified = isVerified(evidence) ? '✅ 已验证' : '尚未完成验证，切换前会重新验证'
+		return {
+			label: `内置出口 ${index + 1}`,
+			description: [
+				candidate.label,
+				screenText(evidence?.screen),
+				gateText(evidence?.gate),
+				completionText(evidence?.completion),
+				verified,
+			]
+				.filter((part) => part !== '')
+				.join(' · '),
+		}
+	})
+}
+
+/**
+ * Ask, then measure, then ask again — the switch is never silent.
+ *
+ * A completion is the strongest evidence this tool can have, and it is only 30
+ * minutes old at most (`COMPLETION_TTL_MS`). Re-probing an exit the scan just
+ * verified would spend the same scarce quota to learn the same fact, precisely
+ * when the user is acting on a result they just paid for. In that window the
+ * dialog shows the existing evidence instead of measuring again; anything older
+ * or weaker is re-measured before the switch.
+ */
 async function applyCandidate(ctx: CommandUi, candidate: ExitCandidate): Promise<void> {
+	const known = evidenceFor(candidate.key)
+	if (isVerified(known)) {
+		const screen = screenText(known?.screen)
+		const confirmed = await ctx.confirm(
+			'切换出口？',
+			`「${candidate.label}」最近一次完整验证已跑完一次真实回答（${completionText(known?.completion)}）。\n${
+				screen === '' ? '' : `已屏检：${screen}\n`
+			}` + '这条路径上的所有请求都会经由该代理；随时可以再切回本机 IP。',
+		)
+		if (!confirmed) return
+		await selectExit(candidate.key)
+		await setPoolEnabled(true)
+		ctx.notify(`已切换：出口池开启，出口 = ${candidate.label}。下一个请求就从这个出口发出。`)
+		return
+	}
 	ctx.notify(`正在通过 ${candidate.label} 跑闸门探测（一个最小形状请求，会消耗少量配额）…`)
 	ctx.setWorkingMessage(`闸门探测：${candidate.label}`)
-	const gate = await gateTestExit(candidate, GATE_MODEL)
+	const { gate, completion } = await verifyExit(candidate, SCAN_MODEL)
 	ctx.setWorkingMessage()
 	ctx.notify(`闸门探测结果：${GATE_MARK[gate.verdict]} ${gate.detail} · ${(gate.e2eMs / 1000).toFixed(1)}s`)
 	if (gate.verdict === 'region' || gate.verdict === 'transport' || gate.verdict === 'shape') {
@@ -254,6 +343,15 @@ async function applyCandidate(ctx: CommandUi, candidate: ExitCandidate): Promise
 			'warning',
 		)
 		return
+	}
+	// A gate pass is not an exit: without the completion, a proxy that answers the
+	// gate and then dies mid-stream would be offered as working.
+	if (completion !== undefined) {
+		ctx.notify(`完成探测结果：${COMPLETION_MARK[completion.verdict]} ${completion.detail} · ${(completion.e2eMs / 1000).toFixed(1)}s`)
+		if (completion.verdict !== 'ok') {
+			ctx.notify('这个出口能过闸门，但没能完整跑完一次真实回答，不切换。', 'warning')
+			return
+		}
 	}
 	const confirmed = await ctx.confirm(
 		'切换出口？',
@@ -307,6 +405,32 @@ async function chooseCustomExit(ctx: CommandUi): Promise<void> {
 	if (chosen) await applyCandidate(ctx, chosen)
 }
 
+/**
+ * Pick one of the exits a scan already admitted.
+ *
+ * This is deliberately separate from the scan. A scan asks "use this one?" while
+ * it is still running, and declining used to be the end of the road: the exits it
+ * had just verified stayed in the pool but the menu gave no way back to them. The
+ * list is built from current evidence, so it also cannot offer an exit that has
+ * since failed; a fresh completion is reused, an older or partial record is
+ * measured again by {@link applyCandidate}.
+ */
+async function chooseBuiltinExit(ctx: CommandUi): Promise<void> {
+	const slots = usableBuiltinSlots()
+	if (slots.length === 0) {
+		ctx.notify('还没有扫描出可用的内置出口。先运行「自动扫描内置出口池」。', 'warning')
+		return
+	}
+	const options = builtinOptions(slots)
+	const choice = await ctx.select('选择内置出口（扫描结果）', options)
+	if (choice === undefined) {
+		ctx.notify('未切换，出口池保持原样。')
+		return
+	}
+	const chosen = slots[options.findIndex((option) => option.label === choice)]
+	if (chosen) await applyCandidate(ctx, chosen)
+}
+
 /** Remove one of the user's own exits. */
 async function removeCustomExit(ctx: CommandUi): Promise<void> {
 	const slots = customSlots()
@@ -330,48 +454,19 @@ async function removeCustomExit(ctx: CommandUi): Promise<void> {
 	ctx.notify(`已删除 ${chosen.label}（${choice}）。`)
 }
 
-/**
- * Announce a winner, ask, and switch. Returns whether the user took it.
- *
- * Declining ends the whole command rather than falling through to the next
- * candidate. A user who said no to this exit is answering a different question
- * than "is there another one" — pushing a second dialog at someone who just
- * declined spends their quota to re-ask the question they closed.
- */
-async function offerWinner(ctx: CommandUi, winner: HuntAttempt): Promise<boolean> {
-	const { candidate, gate } = winner
-	// The winner's own verdict, printed as its own line, before the dialog.
-	//
-	// It is already in the transcript as part of the last `[n / m]` line, but that
-	// is not the same thing: a batch reports up to four candidates, so the last line
-	// before the question is whichever of them happened to be listed last — often a
-	// failure, sometimes a different winner. Asking "use this one?" about an IP the
-	// user cannot see named in the log directly above makes the two halves of the
-	// screen describe different exits. This line is the one that removes the seam.
-	ctx.notify(`✅ 找到可用出口：${candidate.label}（${GATE_MARK.ok} ${gate.detail} · ${(gate.e2eMs / 1000).toFixed(1)}s）`)
-	const accepted = await ctx.confirm(
-		'使用这个出口？',
-		`「${candidate.label}」通过了闸门探测（HTTP ${gate.status ?? 200} · ${(gate.e2eMs / 1000).toFixed(1)}s）。\n` +
-			`已屏检：${screenText(evidenceFor(candidate.key)?.screen)}\n` +
-			'之后的请求都从它发出。随时可以切回本机 IP。',
-	)
-	if (!accepted) {
-		ctx.notify('未切换。出口池保持原样。')
-		return false
-	}
-	await selectExit(candidate.key)
-	await setPoolEnabled(true)
-	ctx.notify(`已切换：出口池开启，出口 = ${candidate.label}。下一个请求就从这个出口发出。`)
-	return true
-}
-
 /** One hunt's progress lines, tagged with the phase they belong to. */
 function huntProgress(ctx: CommandUi, phase: string): (progress: HuntProgress) => void {
-	return ({ attempt, index, total, remaining }) =>
+	return ({ attempt, index, total, remaining }) => {
+		const gate = `闸门 ${GATE_MARK[attempt.gate.verdict]} ${attempt.gate.detail.slice(0, 50)} · ${(attempt.gate.e2eMs / 1000).toFixed(1)}s`
+		const completion =
+			attempt.completion === undefined
+				? ''
+				: ` → 完成 ${COMPLETION_MARK[attempt.completion.verdict]} ${attempt.completion.detail.slice(0, 50)}`
 		ctx.notify(
-			`[${index} / ${total}] ${attempt.candidate.label} → ${GATE_MARK[attempt.gate.verdict]} ${attempt.gate.detail.slice(0, 60)} · ${(attempt.gate.e2eMs / 1000).toFixed(1)}s` +
+			`[${index} / ${total}] ${attempt.candidate.label} → ${gate}${completion}` +
 				(remaining > 0 ? `（还剩 ${remaining} 个未探测）` : phase === '' ? '' : ` · ${phase}`),
 		)
+	}
 }
 
 /**
@@ -398,15 +493,15 @@ function huntProgress(ctx: CommandUi, phase: string): (progress: HuntProgress) =
  * a pool that has just been filled is not asking the user to take a proxy on the
  * strength of a keyless trace.
  */
-async function autoSelectBuiltin(ctx: CommandUi): Promise<void> {
+async function scanBuiltinPool(ctx: CommandUi): Promise<void> {
 	const confirmed = await ctx.confirm(
-		'自动选择一个可用的免费出口？',
+		'扫描免费出口池？',
 		'会先在池里已有的出口中按证据顺序分批并发跑闸门探测（每个候选一个最小形状请求，消耗少量配额），' +
 			'一旦找到可用出口就停下。\n' +
-'如果已有的都不行，才去拉取公开的免费代理列表，逐个屏测，每屏测通过一个就立刻做闸门探测 —— ' +
-				'只有闸门通过的才会进池。\n' +
+			'如果已有的都不行，才去拉取公开的免费代理列表，逐个预筛、屏测，每屏测通过一个就立刻做闸门探测 —— ' +
+			'只有闸门通过的才会进池。\n' +
 			'这些第三方代理能看到它们转发的请求，只在你的手动出口都用尽时使用。\n' +
-			'找到后会询问你，不会自动切换。',
+			'每轮结束都会问你要不要继续；找到后会把可用出口列成一张表让你选，不会自动切换。',
 	)
 	if (!confirmed) return
 
@@ -423,10 +518,11 @@ async function autoSelectBuiltin(ctx: CommandUi): Promise<void> {
 				`每批并发 ${plan.concurrency} 个，最坏 ${plan.rounds} 批。`,
 		)
 		ctx.setWorkingMessage('正在探测池中已有出口…')
-		const first = await huntUsableExit(GATE_MODEL, huntProgress(ctx, '已有出口这一轮全没过，去拉新源'), worthy)
+		const first = await huntUsableExit(SCAN_MODEL, huntProgress(ctx, '已有出口这一轮全没过，去拉新源'), worthy)
 		ctx.setWorkingMessage()
 		if (first.winner !== undefined) {
-			await offerWinner(ctx, first.winner)
+			ctx.notify(`✅ 找到可用出口：${first.winner.candidate.label}（已入池）。`)
+			await chooseBuiltinExit(ctx)
 			return
 		}
 		// The transition has to be visible because the next phase is minutes long and
@@ -438,24 +534,20 @@ async function autoSelectBuiltin(ctx: CommandUi): Promise<void> {
 		ctx.notify('池里没有闸门通过过的出口，直接去拉取免费源。')
 	}
 
-	// ── Pass 2: fetch, screen, gate-probe each survivor as it appears ─────
+	// ── Pass 2: fetch, screen, gate-probe and complete each survivor ───────
 	ctx.setWorkingMessage('正在拉取并屏检免费出口…')
-	// Asked once per round, and only ever with nothing found — so the question is
+	// Asked once per round, and only while the target is unmet — so the question is
 	// asked as often as there is left to test, and never answered for the user. The
 	// counts in the body are what make the answer informed: without them "继续吗"
 	// is a question about whether to give up, which is not what it is.
-	const report = await discoverExit(
-		GATE_MODEL,
-		(line) => ctx.notify(`· ${line}`),
-		async (state) => {
+	const report = await discoverExit(SCAN_MODEL, (line) => ctx.notify(`· ${line}`), {
+		target: SCAN_TARGET,
+		askContinue: async (state) => {
 			ctx.setWorkingMessage()
-			const verdict =
-				state.passed === 0
-					? `${state.passed} 个通过屏检，闸门一次都没跑到（配额没花）`
-					: `${state.passed} 个通过屏检，闸门一个都没过（配额已消耗）`
 			const more = await ctx.confirm(
 				'继续检测更多地址？',
-				`第 ${state.round} 轮结束：累计屏检 ${state.tested} 个地址，${verdict}。\n` +
+				`第 ${state.round} 轮结束：累计预筛 ${state.tested} 个地址，` +
+					`${state.passed} 个通过屏检，${state.verified}/${state.roundTarget} 个已完整验证。\n` +
 					`源里还有 ${state.untested} 个地址没测过（已排除被隔离的）。\n` +
 					'免费代理存活率很低，多跑几轮常常就能碰到一个闸门愿意接受的。\n' +
 					'可以继续，也可以就此停下。',
@@ -463,7 +555,7 @@ async function autoSelectBuiltin(ctx: CommandUi): Promise<void> {
 			ctx.setWorkingMessage('正在拉取并屏检免费出口…')
 			return more
 		},
-	)
+	})
 	ctx.setWorkingMessage()
 
 	// The skip count is stated here as well as inline: a run that finds fewer exits
@@ -479,17 +571,18 @@ async function autoSelectBuiltin(ctx: CommandUi): Promise<void> {
 	// that stopped on the user's "no" looks exactly like a run that exhausted the
 	// lists, and the reasonable conclusion — that the command gave up early — is
 	// exactly what it must not look like.
-const rounds = report.rounds > 1 ? ` · ${report.rounds} 轮` : ''
-		const left = report.untested > 0 ? ` · 源里还有 ${report.untested} 个没测` : ''
-		// Said because it changes what the run cost: a run served from the source
-		// cache spent no requests on the lists at all, so "源 22 个" would otherwise
-		// read as twenty-two downloads that never happened.
-		const fromCache = report.sourcesCached === 0 ? '' : `（其中 ${report.sourcesCached} 个来自本地缓存）`
-		ctx.notify(
-			`检测完成：源 ${report.sourcesFetched + report.sourcesCached} 个${fromCache}（下载失败 ${report.sourcesFailed}）· 候选地址 ${report.candidates} 个 · ` +
-				`屏检 ${report.screened} 个${rounds} · 通过屏检 ${report.screenPassed} 个 · 闸门探测 ${report.gateProbed} 次（消耗配额）· ` +
-				`新出口入池 ${report.admitted} 个${skipped}${merged}${left}。`,
-		)
+	const rounds = report.rounds > 1 ? ` · ${report.rounds} 轮` : ''
+	const left = report.untested > 0 ? ` · 源里还有 ${report.untested} 个没测` : ''
+	// Said because it changes what the run cost: a run served from the source
+	// cache spent no requests on the lists at all, so "源 18 个" would otherwise
+	// read as eighteen downloads that never happened.
+	const fromCache = report.sourcesCached === 0 ? '' : `（其中 ${report.sourcesCached} 个来自本地缓存）`
+	const stopped = report.stopReason === 'budget' ? ' · 完成探测预算用尽' : report.stopReason === 'cancelled' ? ' · 已取消' : ''
+	ctx.notify(
+		`检测完成：源 ${report.sourcesFetched + report.sourcesCached} 个${fromCache}（下载失败 ${report.sourcesFailed}）· 候选地址 ${report.candidates} 个 · ` +
+			`预筛 ${report.screened} 个${rounds} · 进入屏检 ${report.prefilterPassed} 个 · 通过屏检 ${report.screenPassed} 个 · 闸门探测 ${report.gateProbed} 次 · ` +
+			`完成验证 ${report.completionProbed} 次（消耗配额）· 新出口入池 ${report.admitted} 个${skipped}${merged}${left}${stopped}。`,
+	)
 
 	if (report.winners.length === 0) {
 		if (report.attempts.length === 0) {
@@ -524,17 +617,13 @@ const rounds = report.rounds > 1 ? ` · ${report.rounds} 轮` : ''
 		return
 	}
 
-	// The winner and whatever else the in-flight probes found. The extras are already
-	// in the pool, which is the whole reason a run like this pays off twice: the next
-	// one starts by re-probing them instead of paying to find them again.
-	const [winner, ...extras] = report.winners
-	if (extras.length > 0) {
-		ctx.notify(
-			`这一轮闸门通过了 ${report.winners.length} 个出口，都已入池；` +
-				`下次「自动选择内置出口池」会先探它们。`,
-		)
-	}
-	await offerWinner(ctx, winner as HuntAttempt)
+	// The scan's output is a set, not a single answer: in-flight probes when the
+	// target was met also land in the pool, and the user is the one who decides
+	// which route to take. The list is the same one the menu's "选择内置出口"
+	// opens, so the decision does not change shape just because a scan happened
+	// to produce it.
+	ctx.notify(`✅ 本轮测通 ${report.winners.length} 个出口，均已入池；请选择接下来使用哪个。`)
+	await chooseBuiltinExit(ctx)
 }
 
 /**
@@ -589,10 +678,18 @@ async function togglePool(ctx: CommandUi): Promise<void> {
 		return
 	}
 
+	const builtins = usableBuiltinSlots()
 	const route = await ctx.select('开启出口池 — 先选一个出口', [
 		{
-			label: '自动选择内置出口池…',
-			description: '先测池里已有的出口，没有可用的才拉取免费代理列表；找到后询问是否使用',
+			label: '选择内置出口…',
+			description:
+				builtins.length === 0
+					? '还没有扫描出的可用内置出口；先扫描，或从自定义出口里选'
+					: `${builtins.length} 个已扫描且当前可用的内置出口`,
+		},
+		{
+			label: '自动扫描内置出口池…',
+			description: '先测池里已有的出口（闸门 + 完整回答），没有可用的才拉取免费代理列表；找到后列出结果让你选',
 		},
 		{
 			label: '从自定义出口中选择…',
@@ -601,11 +698,50 @@ async function togglePool(ctx: CommandUi): Promise<void> {
 		{ label: '返回', description: '不开启出口池' },
 	])
 	if (route === undefined || route === '返回') return
-	if (route === '自动选择内置出口池…') {
-		await autoSelectBuiltin(ctx)
+	if (route === '选择内置出口…') {
+		await chooseBuiltinExit(ctx)
+		return
+	}
+	if (route === '自动扫描内置出口池…') {
+		await scanBuiltinPool(ctx)
 		return
 	}
 	await chooseCustomExit(ctx)
+}
+
+/**
+ * Enable or disable one built-in source.
+ *
+ * Disabled means *not consulted at all*: no download, and no addresses from a
+ * cached copy. A source the user switched off must not come back through the
+ * hour-old cache, which is why the filter lives in `collectSources` rather than
+ * only in the downloader.
+ */
+async function toggleSources(ctx: CommandUi): Promise<void> {
+	const disabled = disabledSources()
+	const choice = await ctx.select(
+		'免费源（关闭的不下载，缓存也不采用）',
+		FREE_SOURCES.map((url) => ({
+			label: url,
+			description: disabled.has(url) ? '已关闭 —— 选中后重新启用' : '已启用 —— 选中后关闭',
+		})),
+	)
+	if (choice === undefined) return
+	const off = !disabled.has(choice)
+	await setSourceDisabled(choice, off)
+	ctx.notify(`${off ? '已关闭' : '已启用'}免费源：${choice}`)
+}
+
+/** Clear discovered exits without touching the user's own list or their source settings. */
+async function clearBuiltin(ctx: CommandUi): Promise<void> {
+	const confirmed = await ctx.confirm(
+		'清空自动发现的内置出口？',
+		'只会删除自动发现的出口与其证据；exits.txt、出口选择和源设置都保留。\n' +
+			'下次「自动扫描内置出口池」会重新拉取并验证。',
+	)
+	if (!confirmed) return
+	const removed = await clearBuiltinExits()
+	ctx.notify(removed === 0 ? '没有自动发现的内置出口。' : `已清空 ${removed} 个内置出口。`)
 }
 
 export async function runPoolCommand(ctx: CommandUi): Promise<void> {
@@ -616,6 +752,7 @@ export async function runPoolCommand(ctx: CommandUi): Promise<void> {
 	}
 	for (;;) {
 		const active = selectedCandidate()
+		const builtins = usableBuiltinSlots()
 		const choice = await ctx.select('opencode2pi · 出口池', [
 			{
 				label: poolEnabled() ? '关闭出口池（回到本机 IP）' : '开启出口池',
@@ -628,26 +765,38 @@ export async function runPoolCommand(ctx: CommandUi): Promise<void> {
 				description: poolEnabled()
 					? `当前出口 ${active?.label ?? '未选中（直连）'}；关闭后请求按原样发出，选择保留着`
 					: active === undefined
-						? '还没有选中的出口；会先让你选一条路：自动找免费出口，或从 exits.txt 里选 / 手动输入'
-						: `从 ${active.label} 发出（之前选过）；关闭时请求完全按原样发出`,
+						? '还没有选中的出口；会先让你选一条路：已扫描的内置出口、自动扫描，或从 exits.txt 里选 / 手动输入'
+						: `开启后从 ${active.label} 发出（之前选过）；当前关闭，请求按原样发出`,
 			},
 			{
 				label: '选择自定义出口',
-				description: `${customSlots().length} 个你自己的出口（exits.txt），切换前会先跑闸门探测`,
+				description: `${customSlots().length} 个你自己的出口（exits.txt），切换前会跑闸门探测和一次真实回答`,
 			},
 			{
-				label: '自动选择内置出口池',
-				description: '先测池里已有的，没有可用的才拉取免费代理列表；找到后询问是否使用',
+				label: '选择内置出口',
+				description:
+					builtins.length === 0
+						? '还没有扫描出的可用内置出口；先运行「自动扫描内置出口池」'
+						: `${builtins.length} 个已扫描且当前可用的结果；刚验证过的直接询问是否切换，过期的会重新验证`,
+			},
+			{
+				label: '自动扫描内置出口池',
+				description: '先测池里已有的（闸门 + 完整回答），没有可用的才拉取免费代理列表；找到后列出结果让你选',
 			},
 			{ label: '删除自定义出口', description: '从 exits.txt 移除一个出口' },
+			{ label: '设置免费源', description: '启停内置免费代理源；关闭的源不下载，缓存里的地址也不采用' },
+			{ label: '清空内置结果', description: '只删除自动发现的出口，保留 exits.txt 与源设置' },
 			{ label: '查看当前状态', description: '打印完整出口列表与结论，不做任何改动' },
 			{ label: '返回', description: '' },
 		])
 		if (choice === undefined || choice === '返回') return
 		if (choice === '关闭出口池（回到本机 IP）' || choice === '开启出口池') await togglePool(ctx)
 		else if (choice === '选择自定义出口') await chooseCustomExit(ctx)
-		else if (choice === '自动选择内置出口池') await autoSelectBuiltin(ctx)
+		else if (choice === '选择内置出口') await chooseBuiltinExit(ctx)
+		else if (choice === '自动扫描内置出口池') await scanBuiltinPool(ctx)
 		else if (choice === '删除自定义出口') await removeCustomExit(ctx)
+		else if (choice === '设置免费源') await toggleSources(ctx)
+		else if (choice === '清空内置结果') await clearBuiltin(ctx)
 		else if (choice === '查看当前状态') ctx.notify(poolReport())
 	}
 }

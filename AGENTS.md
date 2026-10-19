@@ -109,15 +109,17 @@ src/
   filters.ts    用户选择的隐藏规则 + 派生隐藏集（默认一个都不隐藏）
   store.ts      数据目录与读写（`OPENCODE2PI_DATA_DIR` 可覆盖，测试用）
   exits.ts      exits.txt 文法：解析 / 拒绝原因 / 写回 / 凭据脱敏
-  sources.ts    内置免费代理源（22 条，**不分档**）+ 地址行解析
+  sources.ts    内置免费代理源（18 条，**不分档**）+ 地址行解析
   pool.ts       出口池：开关 · 选中出口 · 证据落盘 · poolFetch · 被动标记
-  pool-probe.ts 屏检（cloudflare trace，5s）· 闸门探测 · 内置源补充（合并取源 + 1h 源缓存）
-  pool-cmd.ts   /opencode2pi pool 的五项 TUI 菜单
+  prefilter.ts  隧道预筛：只发 CONNECT，2s 硬预算，不花配额，坏地址在屏检前出局
+  pool-probe.ts 预筛 → 屏检（cloudflare trace，5s）· 闸门探测 · 完成探测（真实短回答）· 内置源补充（合并取源 + 1h 源缓存 + 源开关）
+  pool-cmd.ts   /opencode2pi pool 的八项 TUI 菜单（含已扫描内置出口选择、免费源开关与清空内置结果）
   commands.ts   /opencode2pi 五条命令（doctor/status/probe/filter/pool）与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts    65 项不变量测试
-  pool.test.ts           73 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射 / 24h 隔离 / 只留闸门通过的 / 发现轮次不停机 / 源缓存不重下）
+  opencode2pi.test.ts    66 项不变量测试
+  pool.test.ts           92 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射 / 24h 隔离 / 只留完成通过的 / 发现轮次不停机 / 源缓存不重下 / 源开关同时作用于缓存 / 清空只删内置结果 / 预筛失败不花屏检）
+  prefilter.test.ts       5 项隧道预筛（200 放行 / 407 拒绝 / 静默超时 / https+IP 不抛 / Basic 凭据）
   transport.test.ts       8 项代理机制（Bun init.proxy / Node dispatcher 不写 proxy）
   host-boundary.test.ts    3 项 src/host/ 下不许出现宿主包名
   session-headers.test.ts  3 项 session 头在两层宿主都真的上了线

@@ -31,13 +31,18 @@ import {
 	addCandidate,
 	admitDiscovered,
 	candidates,
+	clearBuiltinExits,
+	disabledSources,
 	evidenceFor,
 	EXIT_TTL_MS,
 	gradeOf,
+	hasVerified,
 	isQuarantined,
 	isUsable,
+	isVerified,
 	LIMIT_TTL_MS,
 	loadPool,
+	noteCompletionVerdict,
 	noteGateVerdict,
 	noteScreenFailure,
 	noteScreenSuccess,
@@ -47,6 +52,7 @@ import {
 	pruneUnverified,
 	QUARANTINE_MS,
 	quarantinedEntries,
+	recordCompletion,
 	recordGate,
 	recordPassive,
 	recordScreen,
@@ -58,7 +64,9 @@ import {
 	selectExit,
 	selectedKey,
 	setPoolEnabled,
+	setSourceDisabled,
 	type DiscoveredExit,
+	type CompletionEvidence,
 	type ExitEvidence,
 	type GateEvidence,
 	type GateVerdict,
@@ -205,6 +213,56 @@ describe('latency grades and usability', () => {
 		).toBe(false)
 	})
 
+	test('only a completed answer verifies an exit', () => {
+		const gate = { at: Date.now(), modelId: 'm', verdict: 'ok' as const, e2eMs: 900, detail: '' }
+		const completed = { at: Date.now(), modelId: 'm', verdict: 'ok' as const, e2eMs: 800, detail: 'OK', received: 'OK' }
+		const evidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence => ({
+			label: 'x',
+			tier: 'builtin',
+			screen,
+			gate,
+			...overrides,
+		})
+		// The gate pass is usable, but it is not a verification: it answers a question
+		// about the request shape, not about whether a turn can travel through.
+		expect(isUsable(evidence())).toBe(true)
+		expect(isVerified(evidence())).toBe(false)
+		expect(isVerified(evidence({ completion: completed }))).toBe(true)
+		expect(
+			isVerified(
+				evidence({
+					completion: { ...completed, verdict: 'transport' },
+				}),
+			),
+		).toBe(false)
+	})
+
+	test('a failure newer than the completion revokes the verification', () => {
+		// Measured with real traffic: an exit can complete once and then be refused
+		// on the very next turn. A ✅ that ignores that is a promise the pool cannot
+		// keep, so the passive failure is recorded as a claim about the exit.
+		const completedAt = Date.now() - 60_000
+		expect(
+			isVerified({
+				label: 'x',
+				tier: 'builtin',
+				screen,
+				gate: { at: completedAt - 1000, modelId: 'm', verdict: 'ok', e2eMs: 900, detail: '' },
+				completion: { at: completedAt, modelId: 'm', verdict: 'ok', e2eMs: 800, detail: 'OK', received: 'OK' },
+			}),
+		).toBe(true)
+		expect(
+			isVerified({
+				label: 'x',
+				tier: 'builtin',
+				screen,
+				gate: { at: completedAt - 1000, modelId: 'm', verdict: 'ok', e2eMs: 900, detail: '' },
+				completion: { at: completedAt, modelId: 'm', verdict: 'ok', e2eMs: 800, detail: 'OK', received: 'OK' },
+				lastFailure: { at: completedAt + 1, kind: 'limited' },
+			}),
+		).toBe(false)
+	})
+
 	test('a quota refusal is not a dead exit, but a region block is', () => {
 		const withGate = (verdict: GateVerdict): ExitEvidence => ({
 			label: 'x',
@@ -250,14 +308,13 @@ describe('latency grades and usability', () => {
 describe('free source list', () => {
 	test('every source is reachable-shaped and names a real branch', () => {
 		// A source URL with the wrong branch is a 404 that reads exactly like a dead
-		// proxy list, which is why six of these carry `master` and it is worth a
+		// proxy list, which is why five of these carry `master` and it is worth a
 		// test: nothing at runtime would distinguish the two.
 		const masterRepos = new Set([
 			'databay-labs/free-proxy-list/master/',
 			'sunny9577/proxy-scraper/master/',
 			'TheSpeedX/PROXY-List/master/',
 			'TheSpeedX/SOCKS-List/master/',
-			'vakhov/fresh-proxy-list/master/',
 			'Zaeem20/FREE_PROXIES_LIST/master/',
 		])
 		for (const url of FREE_SOURCES) {
@@ -537,6 +594,36 @@ describe('selection, persistence and pruning', () => {
 	})
 })
 
+describe('the user controls what a scan may use', () => {
+	test('a disabled source survives a reload', async () => {
+		const source = FREE_SOURCES[0] as string
+		await setSourceDisabled(source, true)
+		expect(disabledSources().has(source)).toBe(true)
+		await loadPool()
+		expect(disabledSources().has(source)).toBe(true)
+		await setSourceDisabled(source, false)
+		expect(disabledSources().size).toBe(0)
+	})
+
+	test('clearing built-ins keeps manual exits, the selection and the source settings', async () => {
+		const source = FREE_SOURCES[0] as string
+		await setSourceDisabled(source, true)
+		await admitDiscovered([
+			{
+				...screened('http://10.8.0.1:8080', { exitIP: '203.0.113.30' }),
+				gate: { at: Date.now(), modelId: 'm', verdict: 'ok', status: 200, e2eMs: 900, detail: 'HTTP 200' },
+				completion: { at: Date.now(), modelId: 'm', verdict: 'ok', status: 200, e2eMs: 500, detail: 'OK', received: 'OK' },
+			},
+		])
+		await selectExit(exitKey(EXIT))
+		expect(await clearBuiltinExits()).toBe(1)
+		expect(candidates().filter((candidate) => candidate.tier === 'builtin')).toHaveLength(0)
+		expect(candidates().some((candidate) => candidate.key === exitKey(EXIT))).toBe(true)
+		expect(selectedKey()).toBe(exitKey(EXIT))
+		expect(disabledSources().has(source)).toBe(true)
+	})
+})
+
 describe('a failed exit is quarantined from refill for a day', () => {
 	const FAILING = 'http://7.7.7.7:8080'
 
@@ -728,6 +815,15 @@ describe('the pool holds gate-verified exits, not merely screened ones', () => {
 		return {
 			...screened(url, { exitIP }),
 			gate: { at: Date.now(), modelId: 'big-pickle', verdict: 'ok', status: 200, e2eMs: 1200, detail: 'HTTP 200' },
+			completion: {
+				at: Date.now(),
+				modelId: 'big-pickle',
+				verdict: 'ok',
+				status: 200,
+				e2eMs: 900,
+				detail: '完成并返回 OK',
+				received: 'OK',
+			},
 		}
 	}
 
@@ -781,6 +877,94 @@ describe('the pool holds gate-verified exits, not merely screened ones', () => {
 		})
 		expect(isQuarantined(exitKey('http://10.5.0.9:8080'))).toBe(true)
 		expect(quarantinedEntries().some((entry) => entry.record.verdict === 'region')).toBe(true)
+	})
+})
+
+describe('a completed turn is what the pool verifies', () => {
+	const URL = 'http://10.6.0.1:8080'
+	const completion = (overrides: Partial<CompletionEvidence> = {}): CompletionEvidence => ({
+		at: Date.now(),
+		modelId: 'big-pickle',
+		verdict: 'ok',
+		status: 200,
+		e2eMs: 800,
+		detail: '完成并返回 OK',
+		received: 'OK',
+		...overrides,
+	})
+
+	test('it persists across reloads and is what hasVerified reads', async () => {
+		await admitDiscovered([
+			{
+				...screened(URL, { exitIP: '203.0.113.220' }),
+				gate: { at: Date.now(), modelId: 'big-pickle', verdict: 'ok', status: 200, e2eMs: 900, detail: 'HTTP 200' },
+				completion: completion(),
+			},
+		])
+		expect(hasVerified()).toBe(true)
+		await loadPool()
+		expect(isVerified(evidenceFor(exitKey(URL)))).toBe(true)
+	})
+
+	test('a later real failure revokes it without deleting the context', async () => {
+		await admitDiscovered([{ ...screened(URL, { exitIP: '203.0.113.221' }), completion: completion() }])
+		await selectExit(exitKey(URL))
+		await setPoolEnabled(true)
+		await recordPassive('big-pickle', 'RATE_LIMIT')
+		const evidence = evidenceFor(exitKey(URL))
+		expect(evidence?.completion?.verdict).toBe('ok')
+		expect(isVerified(evidence)).toBe(false)
+		expect(hasVerified()).toBe(false)
+		// The quota mark and the failure share the same event, but one is the
+		// per-model view and the other is the exit's verification state.
+		expect(evidence?.modelMarks?.['big-pickle']?.kind).toBe('limited')
+	})
+
+	test('a recorded completion is durable', async () => {
+		await recordCompletion(exitKey(EXIT), completion())
+		expect(isVerified(evidenceFor(exitKey(EXIT)))).toBe(true)
+		await loadPool()
+		expect(evidenceFor(exitKey(EXIT))?.completion?.received).toBe('OK')
+	})
+
+	test('a different exit IP invalidates the old answer', async () => {
+		// A shared proxy source hands out a new egress IP per connection. Keeping the
+		// old gate/completion would claim the new IP inherits an answer given by the
+		// old one, which is the exact mismatch that makes a ✅ fail its next turn.
+		await recordScreen(exitKey(EXIT), { at: Date.now(), exitIP: '203.0.113.0', rttMs: 120 })
+		await recordCompletion(exitKey(EXIT), completion())
+		await recordScreen(exitKey(EXIT), { at: Date.now(), exitIP: '203.0.113.1', rttMs: 100 })
+		expect(evidenceFor(exitKey(EXIT))?.completion).toBeUndefined()
+		expect(evidenceFor(exitKey(EXIT))?.screen?.exitIP).toBe('203.0.113.1')
+		// A second screen on the same IP keeps evidence that is still about it.
+		await recordCompletion(exitKey(EXIT), completion())
+		await recordScreen(exitKey(EXIT), { at: Date.now(), exitIP: '203.0.113.1', rttMs: 90 })
+		expect(isVerified(evidenceFor(exitKey(EXIT)))).toBe(true)
+	})
+
+	test('a discovered exit with only a gate pass is pruned; the same exit with a completion stays', async () => {
+		const gated = 'http://10.6.0.2:8080'
+		const completed = 'http://10.6.0.3:8080'
+		const gate = { at: Date.now(), modelId: 'm', verdict: 'ok' as const, status: 200, e2eMs: 900, detail: 'HTTP 200' }
+		await admitDiscovered([{ ...screened(gated, { exitIP: '203.0.113.2' }), gate }])
+		await admitDiscovered([{ ...screened(completed, { exitIP: '203.0.113.3' }), gate, completion: completion() }])
+		expect(await pruneUnverified()).toBe(1)
+		const builtin = candidates().filter((candidate) => candidate.tier === 'builtin')
+		expect(builtin.map((candidate) => candidate.key)).toEqual([exitKey(completed)])
+	})
+
+	test('a completion-falsified exit leaves even when its gate passed', async () => {
+		const url = 'http://10.6.0.4:8080'
+		await admitDiscovered([
+			{
+				...screened(url, { exitIP: '203.0.113.4' }),
+				gate: { at: Date.now(), modelId: 'm', verdict: 'ok', status: 200, e2eMs: 900, detail: 'HTTP 200' },
+				completion: completion({ verdict: 'transport', detail: 'stream died' }),
+			},
+		])
+		// Admission itself evicts a falsified arrival, so the check is the pool's
+		// contents rather than a second prune count.
+		expect(candidates().some((candidate) => candidate.key === exitKey(url))).toBe(false)
 	})
 })
 
@@ -882,43 +1066,83 @@ describe('a discovery run keeps going until it finds something or is told to sto
 		// fetch, one shuffle, one budget — so a single sweep covers the whole list.
 		const harness = refusing(4000)
 		let asked = 0
-		await discoverExit(
-			'm',
-			() => {},
-			async () => {
+		await discoverExit('m', () => {}, {
+			askContinue: async () => {
 				asked++
 				return false
 			},
-			harness.net,
-		)
+			net: harness.net,
+		})
 		expect(harness.sweeps).toBe(1)
-		expect(harness.calls.trace).toBe(640)
-		expect(asked).toBe(1)
+		// 4000 is below the 4096-address round budget, so all of it belongs to one
+		// sweep. The number that matters here is the source count, not the width.
+		expect(harness.calls.trace).toBe(4000)
+		// Nothing was left, so the run does not ask a question with one answer.
+		expect(asked).toBe(0)
 	})
 
 	test('the user is asked once per round, not once per run', async () => {
 		// Straight-line code asked a single time, so one "yes" bought one extra sweep
 		// and then the run ended with thousands of untried addresses in hand — which
-		// reads to the user as the command giving up. 4000 addresses at 640 a round
-		// is six rounds plus a last one with nothing left, so the question is asked
-		// seven times and answered yes six of them.
-		const harness = refusing(4000)
+		// reads to the user as the command giving up. 8200 addresses at 4096 a round
+		// is two full rounds plus a last one with nothing left, so the question is
+		// asked twice and never about an exhausted list.
+		const harness = refusing(8200)
 		const rounds: number[] = []
 		const untested: number[] = []
-		await discoverExit(
-			'm',
-			() => {},
-			async (state) => {
+		await discoverExit('m', () => {}, {
+			askContinue: async (state) => {
 				rounds.push(state.round)
 				untested.push(state.untested)
 				return true
 			},
-			harness.net,
-		)
-		expect(rounds).toEqual([1, 2, 3, 4, 5, 6])
+			net: harness.net,
+		})
+		expect(rounds).toEqual([1, 2])
 		// Each question reports a shrinking remainder, so the answers are informed:
-		// "还有 3360 个" on round one, and nothing to continue into by round six.
-		expect(untested).toEqual([3360, 2720, 2080, 1440, 800, 160])
+		// "还有 4104 个" on round one, and nothing to continue into by round two.
+		expect(untested).toEqual([4104, 8])
+	}, 20_000)
+
+	test('a failed tunnel prefilter never pays for a trace', async () => {
+		// The whole point of the cheap stage: a socket that cannot CONNECT must not
+		// cost a TLS handshake and an HTTPS request. The screen and the gate must
+		// see nothing, and the address must be remembered as dead.
+		const harness = refusing(50)
+		let traces = 0
+		const net: DiscoveryNet = {
+			...harness.net,
+			prefilter: async () => ({ ok: false, latencyMs: 5, error: 'ECONNREFUSED' }),
+			trace: async (url) => {
+				traces++
+				return harness.net.trace(url)
+			},
+		}
+		const report = await discoverExit('m', () => {}, { target: 1, askContinue: async () => false, net })
+		expect(report.screened).toBe(50)
+		expect(report.prefilterPassed).toBe(0)
+		expect(traces).toBe(0)
+		expect(harness.calls.probe).toBe(0)
+		expect(quarantinedEntries().length).toBe(50)
+	})
+
+	test('a tunnel that opens still goes through the full screen and gate', async () => {
+		// The prefilter is a filter, not a verdict: passing it must change nothing
+		// about the evidence the pool records.
+		const harness = refusing(50)
+		let prefiltered = 0
+		const net: DiscoveryNet = {
+			...harness.net,
+			prefilter: async () => {
+				prefiltered++
+				return { ok: true, latencyMs: 5 }
+			},
+		}
+		const report = await discoverExit('m', () => {}, { target: 1, askContinue: async () => false, net })
+		expect(prefiltered).toBe(50)
+		expect(report.prefilterPassed).toBe(50)
+		expect(harness.calls.trace).toBe(50)
+		expect(harness.calls.probe).toBeGreaterThan(0)
 	})
 
 	test('each round tests addresses the previous one did not', async () => {
@@ -936,12 +1160,7 @@ describe('a discovery run keeps going until it finds something or is told to sto
 				return base.trace(url)
 			},
 		}
-		await discoverExit(
-			'm',
-			() => {},
-			async (state) => state.round < 2,
-			net,
-		)
+		await discoverExit('m', () => {}, { askContinue: async (state) => state.round < 2, net })
 		expect(seen.size).toBe(600)
 	})
 
@@ -949,15 +1168,10 @@ describe('a discovery run keeps going until it finds something or is told to sto
 		// Without this number a run that stopped on the user's "no" is indistinguishable
 		// from one that exhausted the lists, and the reasonable reading — that it gave
 		// up early — is exactly the wrong one.
-		const harness = refusing(800)
-		const report = await discoverExit(
-			'm',
-			() => {},
-			async () => false,
-			harness.net,
-		)
-		expect(report.screened).toBe(640)
-		expect(report.untested).toBe(160)
+		const harness = refusing(5000)
+		const report = await discoverExit('m', () => {}, { askContinue: async () => false, net: harness.net })
+		expect(report.screened).toBe(4096)
+		expect(report.untested).toBe(904)
 		expect(report.rounds).toBe(1)
 	})
 
@@ -968,15 +1182,13 @@ describe('a discovery run keeps going until it finds something or is told to sto
 		const harness = refusing(300)
 		let asked = 0
 		const lines: string[] = []
-		await discoverExit(
-			'm',
-			(line) => lines.push(line),
-			async () => {
+		await discoverExit('m', (line) => lines.push(line), {
+			askContinue: async () => {
 				asked++
 				return true
 			},
-			harness.net,
-		)
+			net: harness.net,
+		})
 		expect(asked).toBe(0)
 		expect(lines.some((line) => line.includes('测完了'))).toBe(true)
 	})
@@ -990,17 +1202,28 @@ describe('a discovery run keeps going until it finds something or is told to sto
 				harness.calls.probe++
 				return { at: Date.now(), modelId, verdict: 'ok' as const, status: 200, e2eMs: 3000, detail: 'HTTP 200' }
 			},
+			complete: async (url, modelId) => {
+				harness.calls.probe++
+				return {
+					at: Date.now(),
+					modelId,
+					verdict: 'ok' as const,
+					status: 200,
+					e2eMs: 1200,
+					detail: '完成并返回 OK',
+					received: 'OK',
+				}
+			},
 		}
 		let asked = 0
-		const report = await discoverExit(
-			'm',
-			() => {},
-			async () => {
+		const report = await discoverExit('m', () => {}, {
+			target: 1,
+			askContinue: async () => {
 				asked++
 				return true
 			},
 			net,
-		)
+		})
 		expect(report.winners.length).toBeGreaterThan(0)
 		expect(report.admitted).toBeGreaterThan(0)
 		// No question asked: the run already answered it.
@@ -1010,13 +1233,161 @@ describe('a discovery run keeps going until it finds something or is told to sto
 		expect(harness.sweeps).toBe(1)
 	})
 
-	test('without a callback the run does one round instead of looping forever', async () => {
-		// The menu always supplies one, but a headless caller that does not would
-		// otherwise spin on a list nobody has read.
-		const harness = refusing(2000)
-		const report = await discoverExit('m', () => {}, undefined, harness.net)
-		expect(report.rounds).toBe(1)
-		expect(report.untested).toBeGreaterThan(0)
+	test('without a callback the run keeps sweeping instead of stopping after one round', async () => {
+		// A headless caller with no one to ask must keep looking: stopping after the
+		// first round is what made a scan end with a single exit (or none) while
+		// thousands of addresses sat untested.
+		const harness = refusing(9000)
+		const report = await discoverExit('m', () => {}, { net: harness.net })
+		// Three rounds: 4096 + 4096 + the remaining 808.
+		expect(report.rounds).toBe(3)
+		expect(report.untested).toBe(0)
+	}, 20_000)
+
+	test('a gate pass without a completed answer is not a winner', async () => {
+		// The failure mode this stage exists for: the exit answers the gate and then
+		// dies mid-stream. Before completion probing that arrival was admitted as ✅
+		// and failed the user's first real turn.
+		const harness = refusing(1000)
+		const base = harness.net
+		const net: DiscoveryNet = {
+			...base,
+			probe: async (url, modelId) => ({
+				at: Date.now(),
+				modelId,
+				verdict: 'ok' as const,
+				status: 200,
+				e2eMs: 800,
+				detail: 'HTTP 200',
+			}),
+			complete: async (url, modelId) => ({
+				at: Date.now(),
+				modelId,
+				verdict: 'transport' as const,
+				e2eMs: 5000,
+				detail: 'stream closed before any token',
+			}),
+		}
+		const report = await discoverExit('m', () => {}, { target: 1, askContinue: async () => false, net })
+		expect(report.winners).toHaveLength(0)
+		expect(report.admitted).toBe(0)
+		// Four workers are already past the screen when the first completion fails,
+		// and the completion budget for one target is exactly four. They do not
+		// become winners; they become bans.
+		expect(report.completionProbed).toBe(4)
+		expect(report.stopReason).toBe('budget')
+		// The address is banned, so the next run does not pay to learn it again.
+		expect(quarantinedEntries().length).toBe(report.completionProbed)
+	})
+
+	test('the completion budget caps what one run can spend', async () => {
+		// The budget is counted in real turns, the only scarce resource here. An
+		// inconclusive completion is not a falsification, so the run would otherwise
+		// keep spending on every survivor.
+		const harness = refusing(4000)
+		const base = harness.net
+		const net: DiscoveryNet = {
+			...base,
+			probe: async (url, modelId) => ({
+				at: Date.now(),
+				modelId,
+				verdict: 'ok' as const,
+				status: 200,
+				e2eMs: 700,
+				detail: 'HTTP 200',
+			}),
+			complete: async (url, modelId) => ({
+				at: Date.now(),
+				modelId,
+				verdict: 'inconclusive' as const,
+				e2eMs: 600,
+				detail: 'completed but said something else',
+				received: 'hello',
+			}),
+		}
+		let asked = 0
+		const report = await discoverExit('m', () => {}, {
+			target: 3,
+			askContinue: async () => {
+				asked++
+				return true
+			},
+			net,
+		})
+		expect(report.completionProbed).toBe(12)
+		expect(report.stopReason).toBe('budget')
+		expect(asked).toBe(0)
+	})
+
+	test('cancelling still admits what was already verified', async () => {
+		// Cancellation cannot un-spend quota. Throwing away a completed answer would
+		// make the next run pay for the same fact a second time.
+		const harness = refusing(4000)
+		const base = harness.net
+		let completed = 0
+		const net: DiscoveryNet = {
+			...base,
+			probe: async (url, modelId) => ({
+				at: Date.now(),
+				modelId,
+				verdict: 'ok' as const,
+				status: 200,
+				e2eMs: 700,
+				detail: 'HTTP 200',
+			}),
+			complete: async (url, modelId) => {
+				completed++
+				return {
+					at: Date.now(),
+					modelId,
+					verdict: 'ok' as const,
+					status: 200,
+					e2eMs: 500,
+					detail: '完成并返回 OK',
+					received: 'OK',
+				}
+			},
+		}
+		const report = await discoverExit('m', () => {}, {
+			target: 100,
+			isCancelled: () => completed >= 1,
+			net,
+		})
+		expect(report.stopReason).toBe('cancelled')
+		expect(report.winners.length).toBeGreaterThan(0)
+		// Admission deduplicates by exit IP, and the test source reuses IPs across
+		// ports, so a concurrent pair can both verify one exit: admission keeps one
+		// slot per IP while the report counts both attempts.
+		expect(report.admitted).toBeGreaterThan(0)
+		expect(report.admitted).toBeLessThanOrEqual(report.winners.length)
+	})
+
+	test('an exit IP already held by the pool is not probed again', async () => {
+		// The claimed set is seeded from the pool, so a re-scan of the same lists does
+		// not spend quota re-probing what the pool already knows.
+		await admitDiscovered([
+			{
+				...screened('http://10.7.0.1:8080', { exitIP: '203.0.113.44' }),
+				gate: { at: Date.now(), modelId: 'm', verdict: 'ok', status: 200, e2eMs: 900, detail: 'HTTP 200' },
+				completion: { at: Date.now(), modelId: 'm', verdict: 'ok', status: 200, e2eMs: 500, detail: 'OK', received: 'OK' },
+			},
+		])
+		const harness = refusing(10)
+		const base = harness.net
+		const net: DiscoveryNet = {
+			...base,
+			trace: async () => ({ at: Date.now(), exitIP: '203.0.113.44', rttMs: 300, country: 'JP', grade: 'A' }),
+		}
+		const report = await discoverExit('m', () => {}, { target: 1, askContinue: async () => false, net })
+		expect(report.duplicates).toBeGreaterThan(0)
+		expect(report.gateProbed).toBe(0)
+	})
+
+	test('the report says why it stopped', async () => {
+		const harness = refusing(300)
+		const report = await discoverExit('m', () => {}, { target: 1, net: harness.net })
+		expect(report.stopReason).toBe('exhausted')
+		expect(report.target).toBe(1)
 	})
 
 	test('the report separates sources downloaded from sources served by the cache', async () => {
@@ -1031,7 +1402,7 @@ describe('a discovery run keeps going until it finds something or is told to sto
 				return { addresses: (await base.collect(() => {})).addresses, fetched: 1, cached: 21, failed: 0 }
 			},
 		}
-		const report = await discoverExit('m', () => {}, async () => false, net)
+		const report = await discoverExit('m', () => {}, { askContinue: async () => false, net })
 		expect(report.sourcesFetched).toBe(1)
 		expect(report.sourcesCached).toBe(21)
 	})
@@ -1109,6 +1480,27 @@ describe('the source list is downloaded once an hour, not once per run', () => {
 		await seedCache(60_000, ['http://198.51.100.7:8080'])
 		const result = await collectSources(() => {}, recorder().download)
 		expect(result.addresses).toEqual(['http://198.51.100.7:8080'])
+	})
+
+	test('a disabled source is neither downloaded nor allowed to contribute cached addresses', async () => {
+		// Disabling a source is a user decision about where addresses come from; it
+		// must survive the cache too, otherwise a stale copy quietly re-admits them.
+		const disabled = FREE_SOURCES[0] as string
+		await seedCache(61 * 60_000, ['http://198.51.100.7:8080'])
+		const net = recorder()
+		const result = await collectSources(() => {}, net.download, new Set([disabled]))
+		expect(net.asked).not.toContain(disabled)
+		expect(net.asked.length).toBe(FREE_SOURCES.length - 1)
+		expect(result.addresses).toEqual(['http://198.51.100.7:8080'])
+	})
+
+	test('a fresh cache obeys the disabled list as well', async () => {
+		const disabled = FREE_SOURCES[0] as string
+		await seedCache(60_000, ['http://198.51.100.9:8080'])
+		const net = recorder()
+		const result = await collectSources(() => {}, net.download, new Set([disabled]))
+		expect(net.asked).toEqual([])
+		expect(result.cached).toBe(FREE_SOURCES.length - 1)
 	})
 
 	test('a source missing from the cache is fetched while the others are reused', async () => {

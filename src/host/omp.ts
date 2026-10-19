@@ -35,6 +35,7 @@ import {
 	type ModelSpec,
 	type NormalizedContext,
 	type SelectItem,
+	type SessionModel,
 	type StreamEngine,
 	type StreamHandler,
 } from './contract.ts'
@@ -75,6 +76,13 @@ function normalizeContext(raw: unknown): NormalizedContext {
 		messages: (context.messages ?? []) as readonly unknown[],
 		withTools: (next) => ({ ...context, tools: next as Tool[] }),
 	}
+}
+
+/** omp's extension context carries the selected model; narrow it to the two ids. */
+function currentModel(ctx: unknown): SessionModel | undefined {
+	const model = (ctx as { model?: SessionModel } | undefined)?.model
+	if (model === undefined) return undefined
+	return { provider: model.provider, api: model.api, id: model.id }
 }
 
 /** omp's failed turn carries the status as a number, so classify from both. */
@@ -181,6 +189,7 @@ export function ompAdapter(pi: unknown): HostAdapter {
 		stream,
 		providerConfig: (models, baseUrl, headers) => ompProviderConfig(stream, models, baseUrl, headers),
 		diagnostics,
+		currentModel,
 		ui: commandUi,
 	}
 }

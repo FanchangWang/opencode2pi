@@ -16,6 +16,28 @@
 import { classifyUpstreamFailure, type UpstreamFailure } from './errors.ts'
 import { GATE_CONDITIONS, sendGateProbe } from './gate.ts'
 import { LANE_ORDER, laneFor, currentLane } from './lanes.ts'
+import { proxyBackend } from './transport.ts'
+
+/**
+ * What the host runtime looks like to upstream.
+ *
+ * Both official OpenCode clients run on Bun. Upstream's gateway now spoofs Bun's
+ * BoringSSL ClientHello (opencode2api d04ff33) because a Go client's TLS
+ * fingerprint is not one any official client sends — evidence that the free tier
+ * can look at more than the HTTP shape. A Bun host already matches; an undici
+ * host cannot be made to match from JavaScript, so the honest answer is a note,
+ * not a silent claim that the gate conditions above are the whole story.
+ */
+function runtimeNote(): string {
+	switch (proxyBackend()) {
+		case 'bun':
+			return '运行时 Bun：TLS 指纹与官方客户端一致。'
+		case 'undici':
+			return '运行时 Node/undici：TLS 指纹与官方 Bun 客户端不同；若闸门一直拒绝而形状无误，改用 Bun 运行。'
+		default:
+			return ''
+	}
+}
 
 export interface DoctorReport {
 	readonly ok: boolean
@@ -38,13 +60,14 @@ export async function runDoctor(modelId: string): Promise<DoctorReport> {
 		.join('\n')
 
 	const healthy = lanes.find(({ probe }) => probe.ok)
+	const runtime = runtimeNote()
 	if (healthy !== undefined) {
 		return {
 			ok: true,
 			kind: 'OK',
 			modelId,
 			headline: `✅ 闸门正常（${modelId}，${healthy.lane} lane ${healthy.probe.latencyMs}ms）`,
-			detail: `两条通道探测结果：\n${summary}\n已注册 lane = ${currentLane()}；探针通过 lane = ${healthy.lane}。`,
+			detail: `两条通道探测结果：\n${summary}\n已注册 lane = ${currentLane()}；探针通过 lane = ${healthy.lane}。${runtime === '' ? '' : `\n${runtime}`}`,
 			latencyMs: healthy.probe.latencyMs,
 		}
 	}
@@ -72,7 +95,7 @@ export async function runDoctor(modelId: string): Promise<DoctorReport> {
 		latencyMs: first.latencyMs,
 		headline: `${shapeBroken ? '🚨' : '⚠️'} 网关拒绝了这次请求：${classification.summary}`,
 		detail: shapeBroken
-			? `上游很可能改了形状闸门，本扩展的硬编码已过期。探测结果：\n${summary}\n本次发送的条件：\n${GATE_CONDITIONS.map((c) => `  - ${c}`).join('\n')}\n请提 issue。原始响应：${first.body.slice(0, 300)}`
-			: `探测结果：\n${summary}\n原始响应（HTTP ${first.status}）：${first.body.slice(0, 300)}`,
+			? `上游很可能改了形状闸门，本扩展的硬编码已过期。探测结果：\n${summary}\n本次发送的条件：\n${GATE_CONDITIONS.map((c) => `  - ${c}`).join('\n')}\n请提 issue。原始响应：${first.body.slice(0, 300)}${runtime === '' ? '' : `\n${runtime}`}`
+			: `探测结果：\n${summary}\n原始响应（HTTP ${first.status}）：${first.body.slice(0, 300)}${runtime === '' ? '' : `\n${runtime}`}`,
 	}
 }

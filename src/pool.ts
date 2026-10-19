@@ -42,10 +42,33 @@ import { readJson, writeJson } from './store.ts'
 import { disposeProxyAgents, proxiedFetch } from './transport.ts'
 
 const STORE_FILE = 'pool.json'
-const STORE_VERSION = 1
+/**
+ * Bumped when the meaning of "verified" changes.
+ *
+ * This is not bookkeeping. The first version of the pool treated a gate `200` as
+ * proof that an exit worked, and the only symptom of that mistake was a ✅ exit
+ * failing the next real turn. When the verification definition changes, evidence
+ * produced under the old one must be discarded, or the menu keeps recommending
+ * exactly the exits the new probe exists to catch. Store version 2 requires a
+ * completed answer (`COMPLETION_TTL_MS`); older completion records are dropped on
+ * load.
+ */
+const STORE_VERSION = 2
+/** Must be raised whenever {@link isVerified} changes meaning. */
+export const PROBE_VERSION = 2
 
 /** Screen and gate verdicts older than this are shown, but no longer trusted. */
 export const EXIT_TTL_MS = 6 * 60 * 60 * 1000
+/**
+ * How long a completed answer proves an exit works.
+ *
+ * Deliberately short, and much shorter than {@link EXIT_TTL_MS}. Free proxies rot
+ * within minutes — the user's report that a just-verified exit failed immediately
+ * is the behaviour this window exists to prevent. Re-verifying costs one real
+ * completion, which is cheap next to a failed turn; trusting a half-hour-old
+ * answer is not.
+ */
+export const COMPLETION_TTL_MS = 30 * 60 * 1000
 /** How long a `429` on one exit says anything: quota windows are minutes-to-a-day. */
 export const LIMIT_TTL_MS = 30 * 60 * 1000
 /** Above this, a candidate is not worth spending a quota probe on (3 s, as opencode2dsh). */
@@ -153,6 +176,30 @@ export interface GateEvidence {
 }
 
 /**
+ * A full turn through the exit: the stream was read to completion and the model
+ * answered `OK`. This is the only evidence that qualifies an exit as verified.
+ *
+ * `received` is kept because "completed but said something else" and "the stream
+ * died" are different diagnoses, and a detail string that only says `inconclusive`
+ * makes the user re-run the probe to find out which one happened.
+ */
+export interface CompletionEvidence {
+	readonly at: number
+	readonly modelId: string
+	readonly verdict: GateVerdict
+	readonly status?: number
+	readonly e2eMs: number
+	readonly detail: string
+	readonly received?: string
+}
+
+/** A real request that failed through the active exit, as observed on the request path. */
+export interface PassiveFailure {
+	readonly at: number
+	readonly kind: 'limited' | 'region'
+}
+
+/**
  * Why an exit is being kept out of refill, and until when.
  *
  * `verdict` is kept rather than a free-text reason because the quarantine is
@@ -185,6 +232,14 @@ export interface ExitEvidence {
 	readonly addedAt?: number
 	readonly screen?: ScreenEvidence
 	readonly gate?: GateEvidence
+	/**
+	 * The completed turn. Absent on stores written before verification meant a
+	 * completion (see {@link PROBE_VERSION}); `isVerified` never guesses from the
+	 * weaker evidence.
+	 */
+	readonly completion?: CompletionEvidence
+	/** The last real request that failed through this exit. */
+	readonly lastFailure?: PassiveFailure
 	readonly modelMarks?: Readonly<Record<string, ModelMark>>
 }
 
@@ -203,9 +258,13 @@ export interface RejectedExit {
 
 interface PoolStore {
 	readonly version: number
+	/** Evidence generation; older records cannot answer the current question. */
+	readonly probeVersion: number
 	readonly enabled: boolean
 	readonly selected: string | null
 	readonly evidence: Readonly<Record<string, ExitEvidence>>
+	/** Built-in sources the user switched off; they are not downloaded or screened. */
+	readonly disabledSources: readonly string[]
 	/**
 	 * Addresses kept out of refill until `until`, keyed the same as `evidence`.
 	 *
@@ -220,9 +279,11 @@ interface PoolStore {
 
 const EMPTY_STORE: PoolStore = {
 	version: STORE_VERSION,
+	probeVersion: PROBE_VERSION,
 	enabled: false,
 	selected: null,
 	evidence: {},
+	disabledSources: [],
 	quarantine: {},
 }
 
@@ -246,24 +307,54 @@ export function isFresh(at: number | undefined, ttl: number): boolean {
 }
 
 /**
+ * Whether the exit has carried a **completed** turn recently.
+ *
+ * This is the pool's only claim of "usable" that survives contact with a real
+ * request. A gate `200` (response headers) and a screen (a trace through the
+ * proxy) are pre-filters, not proof: both can be true of an exit that dies before
+ * the first token. See {@link COMPLETION_TTL_MS} and {@link PROBE_VERSION}.
+ *
+ * A real failure observed after the verification (a 429/region event on the
+ * request path, or a later gate falsification) revokes the claim immediately.
+ * That is what makes "just verified, then immediately failed" visible in the menu
+ * instead of leaving a stale ✅ on it.
+ */
+export function isVerified(evidence: ExitEvidence | undefined): boolean {
+	const completion = evidence?.completion
+	if (completion === undefined || completion.verdict !== 'ok') return false
+	if (!isFresh(completion.at, COMPLETION_TTL_MS)) return false
+	const failure = evidence?.lastFailure
+	if (failure !== undefined && failure.at >= completion.at) return false
+	const gate = evidence?.gate
+	if (gate !== undefined && falsifiesExit(gate.verdict) && gate.at >= completion.at) return false
+	return true
+}
+
+/**
  * Whether an exit is worth offering at all.
  *
- /**
  * Falsified exits — a region block, a dead route, a refused shape — are out
- * regardless of what the screen said. Otherwise two kinds of evidence qualify,
- * because both of them are true statements about the exit:
+ * regardless of what the weaker evidence said. Otherwise three kinds of evidence
+ * qualify, because each is a true statement about the exit:
  *
+ *  · a fresh completed answer: see {@link isVerified};
  *  · a fresh gate `ok`: a real gate-shaped request came back 200 through it;
  *  · a fresh, fast, error-free screen: the proxy carries TLS traffic, which is
  *    what the screen measures. This is the only evidence a bulk-screen run
  *    produces, and it is why screening has to be cheap.
+ *
+ * This predicate decides **ranking and which candidates are worth spending a
+ * probe on**, not whether the pool claims the exit works. The menu and the
+ * selection path use {@link isVerified} for that.
  *
  * A quota `429` does **not** disqualify an exit: quota is metered per model, so
  * the same exit is usually still good for a different one.
  */
 export function isUsable(evidence: ExitEvidence | undefined): boolean {
 	if (!evidence) return false
+	if (isVerified(evidence)) return true
 	if (evidence.gate !== undefined && falsifiesExit(evidence.gate.verdict)) return false
+	if (evidence.completion !== undefined && falsifiesExit(evidence.completion.verdict)) return false
 	if (evidence.gate?.verdict === 'ok' && isFresh(evidence.gate.at, EXIT_TTL_MS)) return true
 	const screen = evidence.screen
 	if (!screen || screen.error !== undefined || screen.rttMs === undefined) return false
@@ -298,9 +389,40 @@ function ensureEvidence(key: string): ExitEvidence | undefined {
 	return candidate === undefined ? undefined : { label: candidate.label, tier: candidate.tier }
 }
 
-/** Ranking key: usable first, then fastest. */
+/** Ranking key: verified first, then usable, then fastest. */
 function rankOf(evidence: ExitEvidence): number {
-	return (isUsable(evidence) ? 0 : 1e9) + (evidence.screen?.rttMs ?? Number.MAX_SAFE_INTEGER)
+	const tier = isVerified(evidence) ? 0 : isUsable(evidence) ? 1e6 : 2e9
+	return tier + (evidence.screen?.rttMs ?? Number.MAX_SAFE_INTEGER)
+}
+
+function narrowCompletion(value: unknown): CompletionEvidence | undefined {
+	if (typeof value !== 'object' || value === null) return undefined
+	const record = value as Partial<CompletionEvidence>
+	if (
+		typeof record.at !== 'number' ||
+		typeof record.modelId !== 'string' ||
+		typeof record.verdict !== 'string' ||
+		typeof record.e2eMs !== 'number' ||
+		typeof record.detail !== 'string'
+	) {
+		return undefined
+	}
+	return {
+		at: record.at,
+		modelId: record.modelId,
+		verdict: record.verdict as GateVerdict,
+		e2eMs: record.e2eMs,
+		detail: record.detail,
+		...(typeof record.status === 'number' ? { status: record.status } : {}),
+		...(typeof record.received === 'string' ? { received: record.received } : {}),
+	}
+}
+
+function narrowFailure(value: unknown): PassiveFailure | undefined {
+	if (typeof value !== 'object' || value === null) return undefined
+	const record = value as Partial<PassiveFailure>
+	if (typeof record.at !== 'number' || (record.kind !== 'limited' && record.kind !== 'region')) return undefined
+	return { at: record.at, kind: record.kind }
 }
 
 function narrowEvidence(value: unknown): ExitEvidence | undefined {
@@ -308,6 +430,8 @@ function narrowEvidence(value: unknown): ExitEvidence | undefined {
 	const record = value as Partial<ExitEvidence>
 	if (typeof record.label !== 'string') return undefined
 	if (record.tier !== 'manual' && record.tier !== 'builtin') return undefined
+	const completion = narrowCompletion(record.completion)
+	const lastFailure = narrowFailure(record.lastFailure)
 	return {
 		label: record.label,
 		tier: record.tier,
@@ -324,6 +448,8 @@ function narrowEvidence(value: unknown): ExitEvidence | undefined {
 				}
 			: {}),
 		...(record.gate ? { gate: record.gate } : {}),
+		...(completion === undefined ? {} : { completion }),
+		...(lastFailure === undefined ? {} : { lastFailure }),
 		...(record.modelMarks ? { modelMarks: record.modelMarks } : {}),
 	}
 }
@@ -357,25 +483,44 @@ function narrowQuarantine(raw: unknown): { kept: Record<string, QuarantineRecord
 	return { kept, dropped }
 }
 
-function narrowStore(raw: unknown): { store: PoolStore; expiredQuarantines: number } {
-	if (typeof raw !== 'object' || raw === null) return { store: EMPTY_STORE, expiredQuarantines: 0 }
+function narrowStore(raw: unknown): { store: PoolStore; expiredQuarantines: number; migrated: boolean } {
+	if (typeof raw !== 'object' || raw === null) return { store: EMPTY_STORE, expiredQuarantines: 0, migrated: false }
 	const record = raw as Partial<PoolStore>
+	const generation = typeof record.probeVersion === 'number' ? record.probeVersion : 0
+	// The old evidence answered "did a gate 200 arrive", not "did a turn complete".
+	// Keeping it would present exactly the exits the new probe exists to catch, so
+	// the completion field is dropped and the address has to earn it again. Gate
+	// and screen survive: they are still honest pre-filters, and discarding them
+	// would make the first re-scan pay for work that remains true.
+	const current = generation >= PROBE_VERSION
 	const evidence: Record<string, ExitEvidence> = {}
 	const source = typeof record.evidence === 'object' && record.evidence !== null ? record.evidence : {}
 	for (const [key, value] of Object.entries(source)) {
 		const kept = narrowEvidence(value)
-		if (kept) evidence[key] = kept
+		if (!kept) continue
+		if (current || (kept.completion === undefined && kept.lastFailure === undefined)) {
+			evidence[key] = kept
+			continue
+		}
+		const { completion: _completion, lastFailure: _failure, ...rest } = kept
+		evidence[key] = rest
 	}
 	const quarantine = narrowQuarantine(record.quarantine)
+	const disabledSources = Array.isArray(record.disabledSources)
+		? record.disabledSources.filter((url): url is string => typeof url === 'string')
+		: []
 	return {
 		store: {
 			version: STORE_VERSION,
+			probeVersion: PROBE_VERSION,
 			enabled: record.enabled === true,
 			selected: typeof record.selected === 'string' ? record.selected : null,
 			evidence,
+			disabledSources,
 			quarantine: quarantine.kept,
 		},
 		expiredQuarantines: quarantine.dropped,
+		migrated: !current,
 	}
 }
 
@@ -436,6 +581,46 @@ export function hasUsable(): boolean {
 	return candidates().some((candidate) => isUsable(store.evidence[candidate.key]))
 }
 
+/** Whether any exit currently carries a completed answer. */
+export function hasVerified(): boolean {
+	return candidates().some((candidate) => isVerified(store.evidence[candidate.key]))
+}
+
+/** Built-in sources the user has switched off. */
+export function disabledSources(): ReadonlySet<string> {
+	return new Set(store.disabledSources)
+}
+
+/** Switch one built-in source on or off. Persisted, so the scan honours it next time. */
+export async function setSourceDisabled(url: string, disabled: boolean): Promise<void> {
+	const next = new Set(store.disabledSources)
+	if (disabled) next.add(url)
+	else next.delete(url)
+	store = { ...store, disabledSources: [...next] }
+	await persist()
+}
+
+/**
+ * Remove every discovered exit, keeping the user's own list and the source list.
+ *
+ * This is what the menu calls "清空内置结果". Discovery results are measurements,
+ * not user data: clearing them must not touch `exits.txt`, and it must not forget
+ * the sources the user disabled. Quarantine is kept too — an address that failed
+ * a minute ago is still a bad bet when the next scan starts.
+ */
+export async function clearBuiltinExits(): Promise<number> {
+	const evidence: Record<string, ExitEvidence> = {}
+	let removed = 0
+	for (const [key, value] of Object.entries(store.evidence)) {
+		if (value.tier === 'builtin') removed++
+		else evidence[key] = value
+	}
+	const selected = store.selected !== null && candidates().some((candidate) => candidate.key === store.selected) ? store.selected : null
+	store = { ...store, evidence, selected }
+	await persist()
+	return removed
+}
+
 /**
  * Re-derive the active candidate. Every mutation ends here.
  *
@@ -480,17 +665,17 @@ async function persist(): Promise<void> {
 }
 
 export async function loadPool(): Promise<void> {
-	const { store: loaded, expiredQuarantines } = narrowStore(await readJson(STORE_FILE))
+	const { store: loaded, expiredQuarantines, migrated } = narrowStore(await readJson(STORE_FILE))
 	store = loaded
 	// What is in the file is now on disk; nothing is waiting to be written. Without
 	// this a later `persistScreens` would rewrite a store it did not change.
 	screenMemoryDirty = false
 	await refreshManual()
-	// Only when something actually expired. Startup runs in every process, so the
-	// write has to stay conditional for the same reason `refreshManual` guards its
-	// own: a store rewritten byte-identically on every launch is a side effect
-	// with no reader.
-	if (expiredQuarantines > 0) await persist()
+	// Only when something actually expired or the evidence generation moved.
+	// Startup runs in every process, so the write has to stay conditional for the
+	// same reason `refreshManual` guards its own: a store rewritten byte-identically
+	// on every launch is a side effect with no reader.
+	if (expiredQuarantines > 0 || migrated) await persist()
 }
 
 export async function setPoolEnabled(enabled: boolean): Promise<void> {
@@ -507,7 +692,17 @@ export async function selectExit(key: string | null): Promise<void> {
 export async function recordScreen(key: string, screen: ScreenEvidence): Promise<void> {
 	const evidence = ensureEvidence(key)
 	if (!evidence) return
-	store = { ...store, evidence: { ...store.evidence, [key]: { ...evidence, screen } } }
+	let next: ExitEvidence = { ...evidence, screen }
+	// A source that hands out a different exit IP per connection is not the exit
+	// that was verified. Keeping the old gate/completion would claim the new IP
+	// inherits the old answer — the precise mismatch that makes a shared proxy look
+	// verified and then fail. The screen is still useful as a fresh pre-filter.
+	const previousIP = evidence.screen?.exitIP
+	if (previousIP !== undefined && screen.exitIP !== undefined && previousIP !== screen.exitIP) {
+		const { gate: _gate, completion: _completion, lastFailure: _failure, ...rest } = evidence
+		next = { ...rest, screen }
+	}
+	store = { ...store, evidence: { ...store.evidence, [key]: next } }
 	await persist()
 }
 
@@ -533,11 +728,11 @@ function falsifiesExit(verdict: GateVerdict): boolean {
  * be using it. A fresh `ok` is direct evidence about the address now, so it wins
  * over whatever was recorded before.
  */
-function applyQuarantine(key: string, gate: GateEvidence): PoolStore {
+function applyQuarantine(key: string, verdict: GateVerdict, at = Date.now()): PoolStore {
 	const quarantine = { ...store.quarantine }
-	if (falsifiesExit(gate.verdict)) {
-		quarantine[key] = { at: Date.now(), until: Date.now() + QUARANTINE_MS, verdict: gate.verdict }
-	} else if (gate.verdict === 'ok') {
+	if (falsifiesExit(verdict)) {
+		quarantine[key] = { at, until: at + QUARANTINE_MS, verdict }
+	} else if (verdict === 'ok') {
 		delete quarantine[key]
 	}
 	return { ...store, quarantine }
@@ -650,7 +845,7 @@ export async function recordGate(key: string, gate: GateEvidence): Promise<void>
 	evidence = { ...evidence, gate }
 	if (gate.verdict === 'limited') evidence = withMark(evidence, gate.modelId, 'limited')
 	if (gate.verdict === 'region') evidence = withMark(evidence, gate.modelId, 'region')
-	store = { ...applyQuarantine(key, gate), evidence: { ...store.evidence, [key]: evidence } }
+	store = { ...applyQuarantine(key, gate.verdict, gate.at), evidence: { ...store.evidence, [key]: evidence } }
 	await persist()
 }
 
@@ -668,7 +863,49 @@ export async function recordGate(key: string, gate: GateEvidence): Promise<void>
  * address is not kept out by a record about yesterday.
  */
 export async function noteGateVerdict(key: string, gate: GateEvidence): Promise<void> {
-	store = applyQuarantine(key, gate)
+	store = applyQuarantine(key, gate.verdict, gate.at)
+	await persist()
+}
+
+/**
+ * Record a completed turn.
+ *
+ * A passing completion lifts an older ban (the address demonstrably works now)
+ * and clears the real-failure suspicion, since the success is newer than it. A
+ * falsifying completion (`transport` / `region` / `shape`) bans the address; a
+ * `limited` completion is a quota fact, not an exit fault, and neither is an
+ * `inconclusive` one (the model answered something other than OK).
+ */
+export async function recordCompletion(key: string, completion: CompletionEvidence): Promise<void> {
+	let evidence = ensureEvidence(key)
+	if (!evidence) {
+		store = applyQuarantine(key, completion.verdict, completion.at)
+		await persist()
+		return
+	}
+	evidence = { ...evidence, completion }
+	if (completion.verdict === 'ok') {
+		const { lastFailure: _failure, ...rest } = evidence
+		evidence = rest
+	} else if (completion.verdict === 'limited') {
+		evidence = withMark(evidence, completion.modelId, 'limited')
+	} else if (completion.verdict === 'region') {
+		evidence = withMark(evidence, completion.modelId, 'region')
+	}
+	store = { ...applyQuarantine(key, completion.verdict, completion.at), evidence: { ...store.evidence, [key]: evidence } }
+	await persist()
+}
+
+/**
+ * The same verdict for an address the pool does not hold yet.
+ *
+ * Discovery completes before admitting, so a failure belongs to an address with
+ * no entry; recording it only as a ban is what stops the next scan from paying
+ * for the same dead candidate again.
+ */
+export async function noteCompletionVerdict(key: string, completion: CompletionEvidence): Promise<void> {
+	if (completion.verdict !== 'ok' && !falsifiesExit(completion.verdict)) return
+	store = applyQuarantine(key, completion.verdict, completion.at)
 	await persist()
 }
 
@@ -709,9 +946,19 @@ export async function recordPassive(modelId: string, kind: 'RATE_LIMIT' | 'REGIO
 	if (!exit) return
 	const evidence = ensureEvidence(exit.key)
 	if (!evidence) return
+	const mark = kind === 'RATE_LIMIT' ? 'limited' : 'region'
 	store = {
 		...store,
-		evidence: { ...store.evidence, [exit.key]: withMark(evidence, modelId, kind === 'RATE_LIMIT' ? 'limited' : 'region') },
+		evidence: {
+			...store.evidence,
+			[exit.key]: {
+				...withMark(evidence, modelId, mark),
+				// Newer than the completion, so `isVerified` stops trusting it. This is
+				// the difference between "verified 20 minutes ago" and "verified 20
+				// minutes ago, then the very next turn was rate-limited".
+				lastFailure: { at: Date.now(), kind: mark },
+			},
+		},
 	}
 	// `persist()` rather than a bare fire-and-forget write: this runs on the
 	// request path, where a plain `void writeJson` could land *after* a
@@ -776,6 +1023,7 @@ export async function admitDiscovered(entries: readonly DiscoveredExit[]): Promi
 			addedAt: base + rank,
 			screen: entry.screen,
 			...(entry.gate ? { gate: entry.gate } : {}),
+			...(entry.completion ? { completion: entry.completion } : {}),
 		}
 	}
 	const admitted = Object.keys(additions).length
@@ -814,14 +1062,16 @@ function evictFalsified(evidence: Record<string, ExitEvidence>): Record<string, 
 /**
  * One pass over the store: keep the discovered exits worth keeping.
  *
- * `requireGate` is the difference between the two callers. Admission runs it off,
- * because an entry is being introduced right now and judging it before the gate has
- * spoken would evict the very arrival being admitted. {@link pruneUnverified} runs
- * it on, which is the invariant the pool is supposed to hold.
+ * `requireEvidence` is the difference between the two callers. Admission runs it
+ * off, because an entry is being introduced right now and judging it before the
+ * probe has spoken would evict the very arrival being admitted.
+ * {@link pruneUnverified} runs it on: a discovered exit is kept only if a real
+ * completion travelled through it. A gate pass alone is not enough — it proves the
+ * request shape was accepted, which is a statement about us, not about the exit.
  *
  * Manual entries are never touched — they are the user's file, not our measurements.
  */
-function dropUnverified(evidence: Record<string, ExitEvidence>, requireGate: boolean): Record<string, ExitEvidence> {
+function dropUnverified(evidence: Record<string, ExitEvidence>, requireEvidence: boolean): Record<string, ExitEvidence> {
 	const kept: Record<string, ExitEvidence> = {}
 	let dropped = 0
 	for (const [key, value] of Object.entries(evidence)) {
@@ -831,7 +1081,13 @@ function dropUnverified(evidence: Record<string, ExitEvidence>, requireGate: boo
 				dropped++
 				continue
 			}
-			if (requireGate && gate === undefined) {
+			// A completion that falsified the exit is newer, stronger evidence than
+			// any gate pass it may also carry.
+			if (value.completion !== undefined && falsifiesExit(value.completion.verdict)) {
+				dropped++
+				continue
+			}
+			if (requireEvidence && (gate === undefined || value.completion === undefined)) {
 				dropped++
 				continue
 			}
@@ -864,6 +1120,12 @@ export interface DiscoveredExit {
 	readonly url: string
 	readonly screen: ScreenEvidence & { readonly exitIP: string }
 	readonly gate?: GateEvidence
+	/**
+	 * The completed turn that admitted it. Required by the current discovery
+	 * pipeline, optional here because this is a store primitive and older callers
+	 * (and tests) still describe gate-verified arrivals.
+	 */
+	readonly completion?: CompletionEvidence
 }
 
 /**

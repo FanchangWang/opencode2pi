@@ -47,6 +47,24 @@ const ANONYMOUS_KEY = 'public'
  */
 const GATE_TOTAL_TIMEOUT_MS = 20_000
 
+/**
+ * A real completion gets more room than the gate probe.
+ *
+ * The gate probe stops at response headers, so its 20 s only covers the tunnel
+ * and the upstream's first byte. This one waits for the model to finish a turn
+ * *and* for the stream to close, which is the one number the pool was missing:
+ * a 200 proves the request shape was accepted, not that the exit can carry an
+ * answer. 30 s is still bounded — a free proxy that cannot deliver "OK" inside
+ * it is not an exit worth keeping, and the scan must not wait forever on one.
+ */
+const COMPLETION_TIMEOUT_MS = 30_000
+
+/** The answer the completion probe demands. Whitespace and trailing punctuation only. */
+const COMPLETION_MATCH = /^\s*OK[.!。！]?\s*$/i
+
+/** Stop reading an unbounded stream once it can no longer change the verdict. */
+const COMPLETION_MAX_BYTES = 256 * 1024
+
 export interface GateProbe {
 	readonly ok: boolean
 	readonly status: number | undefined
@@ -54,6 +72,18 @@ export interface GateProbe {
 	readonly latencyMs: number
 	/** Set when the request never produced an HTTP response. */
 	readonly transportError?: string
+	/** Assistant text accumulated from a completion probe. */
+	readonly completion?: string
+	/** Whether {@link completion} matched the demanded answer. */
+	readonly matched?: boolean
+}
+
+interface ProbeOptions {
+	/** Prompt for a completion probe; ignored by the gate probe. */
+	readonly prompt?: string
+	/** Read the stream to completion instead of stopping at the headers. */
+	readonly readCompletion?: boolean
+	readonly timeoutMs?: number
 }
 
 /** OpenAI wire shape for the gate tools of one lane. */
@@ -97,16 +127,44 @@ export const GATE_CONDITIONS: readonly string[] = [
  * gate request itself, from that IP, over the code path that will carry it.
  */
 export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: string): Promise<GateProbe> {
+	return probe(modelId, lane, exit, {})
+}
+
+/**
+ * Ask the exit for a real answer, not merely an accepted request.
+ *
+ * Why this exists: a gate `200` arrives at the response headers, and the pool
+ * used to stop there. That is a statement about the request shape, not about the
+ * exit: an upstream can send 200 and then an SSE error event, a proxy can die
+ * between the headers and the first token, and a shared free IP can spend its
+ * quota after the probe. Measured consequence: an exit the menu marked ✅ could
+ * fail the very next real turn. This probe drains the stream and requires the
+ * model to finish with the demanded answer, so "verified" means "a completion
+ * travelled through this exit", which is what the user is buying.
+ *
+ * The request body is the gate body in every other respect. Keeping the shape in
+ * one builder is what stops doctor, health, and the pool from drifting apart.
+ */
+export async function sendCompletionProbe(modelId: string, lane: LaneKey, exit?: string): Promise<GateProbe> {
+	return probe(modelId, lane, exit, {
+		prompt: 'Reply with exactly OK',
+		readCompletion: true,
+		timeoutMs: COMPLETION_TIMEOUT_MS,
+	})
+}
+
+async function probe(modelId: string, lane: LaneKey, exit: string | undefined, options: ProbeOptions): Promise<GateProbe> {
 	const startedAt = Date.now()
 	const session = canonicalSessionID(`opencode2pi:gate:${modelId}:${startedAt}:${lane}`)
 	const shape = laneFor(lane)
+	const timeoutMs = options.timeoutMs ?? GATE_TOTAL_TIMEOUT_MS
 
 	// A candidate exit is judged on the whole request, tunnel included. There is no
 	// separate tunnel-stage cap: see GATE_TOTAL_TIMEOUT_MS for the measurement that
 	// removed it, and for why dead exits turn out not to need one.
 	const proxied = exit === undefined ? undefined : proxiedFetch(exit)
 	const via = proxied ?? globalThis.fetch
-	const signal = AbortSignal.timeout(GATE_TOTAL_TIMEOUT_MS)
+	const signal = AbortSignal.timeout(timeoutMs)
 
 	let response: Response
 	try {
@@ -122,8 +180,8 @@ export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: strin
 			body: JSON.stringify({
 				model: modelId,
 				stream: true,
-				max_tokens: 16,
-				messages: [{ role: 'user', content: 'Reply with OK.' }],
+				max_tokens: options.readCompletion === true ? 24 : 16,
+				messages: [{ role: 'user', content: options.prompt ?? 'Reply with OK.' }],
 				tools: gateTools(lane),
 			}),
 			signal,
@@ -132,14 +190,107 @@ export async function sendGateProbe(modelId: string, lane: LaneKey, exit?: strin
 		return { ok: false, status: undefined, body: '', latencyMs: Date.now() - startedAt, transportError: String(error) }
 	}
 
-	const latencyMs = Date.now() - startedAt
-	if (response.ok) {
-		await response.body?.cancel()
-		return { ok: true, status: response.status, body: '', latencyMs }
+	if (!response.ok) {
+		const body = await response.text().catch(() => '')
+		return { ok: false, status: response.status, body, latencyMs: Date.now() - startedAt }
 	}
 
-	const body = await response.text().catch(() => '')
-	return { ok: false, status: response.status, body, latencyMs }
+	if (options.readCompletion !== true) {
+		// Reaching the headers *is* the gate verdict; reading a completion would
+		// spend tokens to learn nothing the caller asked about.
+		await response.body?.cancel()
+		return { ok: true, status: response.status, body: '', latencyMs: Date.now() - startedAt }
+	}
+
+	const read = await readCompletion(response)
+	const latencyMs = Date.now() - startedAt
+	const completion = read.content.trim()
+	// A 200 is not a pass here: the stream has to end with the demanded answer.
+	// An in-band error is returned as `body` so the caller classifies it with the
+	// same code the real request path uses (a 200 + RegionError is still a region
+	// block, and a 200 + FreeTierError is still a shape rejection).
+	if (read.error !== undefined) {
+		return { ok: false, status: response.status, body: read.error, latencyMs, completion }
+	}
+	return {
+		ok: COMPLETION_MATCH.test(completion),
+		status: response.status,
+		body: completion,
+		latencyMs,
+		completion,
+		matched: COMPLETION_MATCH.test(completion),
+	}
+}
+
+/**
+ * Drain an SSE completion and return its assistant text.
+ *
+ * Deliberately tolerant: providers on this lane have emitted both `delta.content`
+ * and a non-streaming `message.content`, and older shapes put the text in a bare
+ * `data:` line. Anything unparseable is skipped rather than treated as a failure
+ * — the failure this probe cares about is an *error event*, which is captured
+ * separately so the caller can classify it.
+ */
+async function readCompletion(response: Response): Promise<{ content: string; error?: string }> {
+	const reader = response.body?.getReader()
+	if (reader === undefined) return { content: '' }
+	const decoder = new TextDecoder()
+	let buffer = ''
+	let content = ''
+	let error: string | undefined
+	let bytes = 0
+	const consume = (line: string): void => {
+		const trimmed = line.trim()
+		if (!trimmed.startsWith('data:')) return
+		const data = trimmed.slice(5).trim()
+		if (data === '' || data === '[DONE]') return
+		let payload: unknown
+		try {
+			payload = JSON.parse(data)
+		} catch {
+			return
+		}
+		if (typeof payload !== 'object' || payload === null) return
+		const record = payload as {
+			error?: { message?: string } | string
+			message?: string
+			type?: string
+			choices?: { delta?: { content?: string }; message?: { content?: string } }[]
+		}
+		if (record.error !== undefined) {
+			error =
+				typeof record.error === 'string'
+					? record.error
+					: (record.error.message ?? '上游在流内返回了错误事件')
+		} else if (record.type === 'error' && typeof record.message === 'string') {
+			error = record.message
+		}
+		const choice = record.choices?.[0]
+		content += choice?.delta?.content ?? choice?.message?.content ?? ''
+	}
+
+	try {
+		for (;;) {
+			const { done, value } = await reader.read()
+			if (done) break
+			bytes += value.byteLength
+			buffer += decoder.decode(value, { stream: true })
+			const lines = buffer.split('\n')
+			buffer = lines.pop() ?? ''
+			for (const line of lines) consume(line)
+			if (bytes >= COMPLETION_MAX_BYTES) {
+				await reader.cancel().catch(() => {})
+				break
+			}
+		}
+		buffer += decoder.decode()
+		if (buffer !== '') consume(buffer)
+	} catch (failure) {
+		// A stream that dies mid-answer is a transport verdict: the exit did not
+		// carry the turn to completion. The caller turns this into one.
+		return { content, error: `流中断：${String(failure)}` }
+	}
+	return { content, ...(error === undefined ? {} : { error }) }
 }
 
 /**

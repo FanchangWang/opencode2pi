@@ -161,6 +161,33 @@ export default async function (pi: ExtensionApiLike): Promise<void> {
 	onHiddenChange(() => reapply())
 	applyProvider(pi, adapter)
 
+	// The pool persists across sessions, which is useful and also the one state a
+	// user can forget about overnight: the next morning's requests would leave
+	// through yesterday's proxy without a word. `session_start` is the only hook
+	// that runs when the TUI is already live on both hosts, so the notice is
+	// emitted there and only when the model actually selected is ours — a user
+	// chatting on another provider is not using this pool at all.
+	pi.on?.('session_start', (_event, ctx) => {
+		try {
+			const model = adapter.currentModel(ctx)
+			if (model?.provider !== PROVIDER && model?.api !== API_ID) return
+			if (!poolEnabled()) return
+			const ui = adapter.ui(ctx)
+			if (!ui.hasUI) return
+			const exit = activeCandidate()
+			ui.notify(
+				proxyBackend() === 'none'
+					? 'opencode2pi：出口池处于开启状态，但当前运行时没有可用的代理机制，请求会从本机 IP 发出。用 /opencode2pi pool 关闭出口池，或换用带 undici 的 Node / Bun 运行。'
+					: exit === undefined
+						? 'opencode2pi：出口池处于开启状态，但没有有效的已选出口，请求会从本机 IP 发出。用 /opencode2pi pool 选择或关闭。'
+						: `opencode2pi：出口池处于开启状态，当前出口 ${exit.label}（请求会经由该代理）。用 /opencode2pi pool 查看、切换或关闭。`,
+				'warning',
+			)
+		} catch (error) {
+			adapter.diagnostics.warn(`[${PROVIDER}] 启动时出口池提示失败：${String(error)}`)
+		}
+	})
+
 	// The host awaits extension factories and only then drains the registration
 	// queue, so waiting here is what lets `--model provider/id` resolve an id that
 	// discovery found and the seed does not carry. The seed is already registered,

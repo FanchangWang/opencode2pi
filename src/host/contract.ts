@@ -183,6 +183,21 @@ export interface SelectItem {
 }
 
 /**
+ * The model the host says is selected at session start.
+ *
+ * Both hosts expose `provider` and `api` on their `Model`, but this is read off
+ * an untyped session context, so every field is optional: a host that changes
+ * shape must degrade to "cannot tell", never crash startup. `api` is included
+ * because it is the one identifier this extension fully controls (`API_ID`),
+ * while `provider` is the registry name.
+ */
+export interface SessionModel {
+	readonly provider?: string
+	readonly api?: string
+	readonly id?: string
+}
+
+/**
  * The subset of `ctx.ui` the commands use.
  *
  * `select` is normalized to omp's richer shape on purpose: pi takes bare
@@ -254,6 +269,8 @@ export interface HostAdapter {
 	readonly providerConfig: (models: readonly ModelSpec[], baseUrl: string, headers: Record<string, string>) => Record<string, unknown>
 	/** Where startup and discovery notes go. Never throws. */
 	readonly diagnostics: HostLogger
+	/** The selected model at session start, if the host exposes one. */
+	readonly currentModel: (ctx: unknown) => SessionModel | undefined
 	/** Wrap a host command context into the shared UI port. */
 	readonly ui: (ctx: unknown) => CommandUi
 }
@@ -278,6 +295,16 @@ export interface ExtensionApiLike {
 		name: string,
 		options: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> },
 	): void
+	/**
+	 * Session lifecycle events, present on both hosts.
+	 *
+	 * Optional in this contract because it is the one hook the extension can
+	 * live without: if a host ever drops it, the startup pool reminder simply
+	 * never appears. The handler signature is narrowed to the event this
+	 * extension uses — `session_start` is emitted after the TUI is live on both
+	 * hosts, which is what makes notifying from it safe.
+	 */
+	on?(event: 'session_start', handler: (event: unknown, ctx: unknown) => void): void
 	/** omp only. */
 	readonly logger?: HostLogger
 }

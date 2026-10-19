@@ -2,30 +2,37 @@
  * Free exit-IP source list — the `http://` subset of `opencode2dsh`'s
  * `packages/plugin/src/pool/sources.ts`, ported on 2026-10-17.
  *
- * Twenty-two `raw.githubusercontent.com`-and-friends URLs, in **one flat list with
+ * Eighteen `raw.githubusercontent.com`-and-friends URLs, in **one flat list with
  * no tiers**. They used to carry a `'fast' | 'slow'` label, ported along with the
  * order from the reference's `fastUpdateSources` / `slowUpdateSources`. That label
  * was never measured here — it was a hand-ordered guess from another codebase —
  * and all it actually did was split each round's screen budget in two and keep
  * fourteen sources permanently second. The tier was removed on 2026-10-17: every
  * source is fetched together and the addresses are shuffled as one pool, so a
- * round samples all twenty-two rather than exhausting eight before touching the
+ * round samples all of them rather than exhausting eight before touching the
  * rest. `discoverExit` in pool-probe.ts is the only consumer.
  *
- * Of these twenty-two, twenty are `raw.githubusercontent.com`. They were jsdelivr
+ * Of these eighteen, sixteen are `raw.githubusercontent.com`. They were jsdelivr
  * (`cdn.jsdelivr.net/gh/…`) until 2026-10-17, when measuring which hosts this
  * machine can actually reach showed 20 of the 22 sources failing on direct
  * access and only two responding — so the CDN was not an asset here, and a
  * source list that mostly returns `fetch failed` is worse than a short one.
  *
- * **The branch in each URL is verified, not assumed.** Six of these repositories
+ * **Four sources were dropped on 2026-10-19 after measuring every URL through the
+ * local proxy**: proxymint/free-proxy-list is gone (raw and repository both 404);
+ * proxy4parsing/proxy-list and prxchk/proxy-list have had no commit since
+ * 2024-04-27 and 2024-04-13; vakhov/fresh-proxy-list still commits to its branch
+ * but `http.txt` has not changed since 2026-02-07 (253 days). A list that keeps
+ * answering 200 with the same addresses is worse than a 404: it makes a run look
+ * productive while testing a frozen file.
+ *
+ * **The branch in each URL is verified, not assumed.** Five of these repositories
  * do not use `main`:
  *
  *   · databay-labs/free-proxy-list → `master`
  *   · sunny9577/proxy-scraper→ `master`
  *   · TheSpeedX/PROXY-List          → `master`
  *   · TheSpeedX/SOCKS-List          → `master`
- *   · vakhov/fresh-proxy-list       → `master`
  *   · Zaeem20/FREE_PROXIES_LIST     → `master`
  *
  * Confirmed against the GitHub API's `default_branch` on 2026-10-17, and the
@@ -76,7 +83,6 @@ export const GITHUB_MIRRORS: readonly string[] = [
 export const FREE_SOURCES: readonly string[] = [
 	'https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt',
 	'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-	'https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt',
 	// `master`, not `main` — measured: the main branch of this repo 404s here.
 	'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt',
 	'https://raw.githubusercontent.com/proxio-io/proxy-list/main/http.txt',
@@ -87,14 +93,11 @@ export const FREE_SOURCES: readonly string[] = [
 	'https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt',
 	'https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt',
 	'https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt',
-	'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt',
 	'https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt',
-	'https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt',
 	// live-verified upstream 2026-09-09
 	'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt',
 	'https://raw.githubusercontent.com/Tianndev/free-proxy/main/proxy/http.txt',
 	'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt',
-	'https://raw.githubusercontent.com/proxymint/free-proxy-list/main/proxies/http.txt',
 	'https://raw.githubusercontent.com/Ian-Lusule/Proxies/main/proxies/http.txt',
 	'http://openproxylist.xyz/http.txt',
 	// Replaces api.proxyscrape.com, which was unreachable here while this GitHub

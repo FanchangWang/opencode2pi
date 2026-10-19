@@ -52,6 +52,7 @@ import {
 	type ModelSpec,
 	type NormalizedContext,
 	type SelectItem,
+	type SessionModel,
 	type StreamEngine,
 	type StreamHandler,
 } from './contract.ts'
@@ -133,6 +134,13 @@ function normalizeContext(raw: unknown): NormalizedContext {
 			return { messages: [substituted, ...rest] } as unknown as Context
 		},
 	}
+}
+
+/** pi's extension context carries the selected model; narrow it to the two ids. */
+function currentModel(ctx: unknown): SessionModel | undefined {
+	const model = (ctx as { model?: SessionModel } | undefined)?.model
+	if (model === undefined) return undefined
+	return { provider: model.provider, api: model.api, id: model.id }
 }
 
 /** One transcript entry, as far as the replay helpers are concerned. */
@@ -274,6 +282,7 @@ export function piAdapter(pi: unknown): HostAdapter {
 		stream,
 		providerConfig: (models, baseUrl, headers) => piProviderConfig(stream, models, baseUrl, headers),
 		diagnostics,
+		currentModel,
 		ui: (ctx) => {
 			const ui = commandUi(ctx)
 			// First command of the session is where the buffered startup notes can
