@@ -22,7 +22,6 @@
 
 import { createHash } from 'node:crypto'
 
-import { parseProxyLine } from './sources.ts'
 import { readText, writeText } from './store.ts'
 
 /** Schemes this runtime can actually dial through `fetch(…, { proxy })`. */
@@ -81,6 +80,63 @@ function maskCredentials(text: string): string {
 /** Strip a trailing comment (whitespace + `#` / `;` / `//`) and the BOM. */
 function stripComment(line: string): string {
 	return line.replace(/\s+(?:#|;|\/\/).*$/, '').trim()
+}
+
+/**
+ * Canonicalize one `host:port` / `http://…` line.
+ *
+ * Ported from the reference's list parser: quotes, a BOM and a cosmetic trailing
+ * slash are tolerated, credentials are kept, and anything that is not an
+ * `http(s)` proxy is refused (see {@link DIALABLE} for why socks cannot be
+ * dialled here).
+ */
+export function parseProxyLine(line: string): string | null {
+	let text = line
+	// BOM first: it survives trim() and would otherwise poison the scheme match.
+	if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+	text = text.trim()
+	// Lists quote lines inconsistently; unwrap repeatedly so `"'h:p'"` also lands.
+	while (text.length >= 2) {
+		const quote = text[0]
+		if ((quote !== '"' && quote !== "'") || text[text.length - 1] !== quote) break
+		text = text.slice(1, -1).trim()
+	}
+	if (text === '') return null
+	if (text.startsWith('#') || text.startsWith(';') || text.startsWith('//')) return null
+
+	let scheme = 'http'
+	const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//i.exec(text)
+	if (schemeMatch?.[1]) {
+		const found = schemeMatch[1].toLowerCase()
+		// Every socks flavour is unusable under Bun's fetch proxy — reject on the
+		// scheme alone, before any host/port parsing can rescue it.
+		if (found.startsWith('socks')) return null
+		if (found !== 'http' && found !== 'https') return null
+		scheme = found
+		text = text.slice(schemeMatch[0].length)
+	}
+
+	let credentials = ''
+	const at = text.lastIndexOf('@')
+	if (at >= 0) {
+		credentials = text.slice(0, at)
+		text = text.slice(at + 1)
+		if (credentials === '' || /[\s/]/.test(credentials)) return null
+	}
+
+	// A single trailing slash is cosmetic (`host:port/`); anything else is a path.
+	if (text.endsWith('/')) text = text.slice(0, -1)
+	if (text === '' || /[\s/]/.test(text)) return null
+
+	const bracketed = /^(\[[^\]]+\]):(\d{1,5})$/.exec(text)
+	const plain = bracketed ? null : /^([^:]+):(\d{1,5})$/.exec(text)
+	const host = bracketed?.[1] ?? plain?.[1]
+	const portText = bracketed?.[2] ?? plain?.[2]
+	if (!host || !portText || /\s/.test(host)) return null
+
+	const port = Number(portText)
+	if (!Number.isInteger(port) || port < 1 || port > 65535) return null
+	return `${scheme}://${credentials === '' ? '' : `${credentials}@`}${host}:${port}`
 }
 
 /**

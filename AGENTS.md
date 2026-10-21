@@ -81,8 +81,8 @@
     120s 内重试 28 次，再自动换出口等于把请求量乘起来，而这条通道正是按量记账的。
     **代理机制按运行时选，不按宿主选**（`src/transport.ts`）：Bun 走 `init.proxy`，
     **Node 走 undici 的 `ProxyAgent` 且必须同时替换 fetch**。Node 会**静默忽略**
-    `init.proxy`（不报错、直连），所以屏检与真实请求必须共用同一个 transport ——
-    否则会出现「屏检走的代理、真实请求直连」这种最难查的偏差（`FINDINGS.md` §2.7）。
+    `init.proxy`（不报错、直连），所以闸门/完成探测与真实请求必须共用同一个 transport ——
+    否则会出现「探测走的代理、真实请求直连」这种最难查的偏差（`FINDINGS.md` §2.7）。
 
 ---
 
@@ -108,19 +108,16 @@ src/
   health.ts     逐模型探测 · 判定规则 · 落盘缓存
   filters.ts    用户选择的隐藏规则 + 派生隐藏集（默认一个都不隐藏）
   store.ts      数据目录与读写（`OPENCODE2PI_DATA_DIR` 可覆盖，测试用）
-  exits.ts      exits.txt 文法：解析 / 拒绝原因 / 写回 / 凭据脱敏
-  sources.ts    内置免费代理源（18 条，**不分档**）+ 地址行解析
-  pool.ts       出口池：开关 · 选中出口 · 证据落盘 · poolFetch · 被动标记
-  prefilter.ts  隧道预筛：只发 CONNECT，2s 硬预算，不花配额，坏地址在屏检前出局
-  pool-probe.ts 预筛 → 屏检（cloudflare trace，5s）· 闸门探测 · 完成探测（真实短回答）· 内置源补充（合并取源 + 1h 源缓存 + 源开关）
-  pool-cmd.ts   /opencode2pi pool 的八项 TUI 菜单（含已扫描内置出口选择、免费源开关与清空内置结果）
+  exits.ts      exits.txt 文法：解析 / 拒绝原因 / 写回 / 凭据脱敏 / 地址行解析
+  pool.ts       出口池（仅自定义出口）：开关 · 选中出口 · 证据落盘 · poolFetch · 被动标记
+  pool-probe.ts 闸门探测（最小形状请求）· 完成探测（真实短回答）
+  pool-cmd.ts   /opencode2pi pool 的四项 TUI 菜单（开关 / 选择或新增 / 删除 / 查看状态）
   commands.ts   /opencode2pi 五条命令（doctor/status/probe/filter/pool）与 TUI
   host.d.ts     把 @earendil-works/* 桥到真实宿主类型
 test/
-  opencode2pi.test.ts    66 项不变量测试
-  pool.test.ts           92 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射 / 24h 隔离 / 只留完成通过的 / 发现轮次不停机 / 源缓存不重下 / 源开关同时作用于缓存 / 清空只删内置结果 / 预筛失败不花屏检）
-  prefilter.test.ts       5 项隧道预筛（200 放行 / 407 拒绝 / 静默超时 / https+IP 不抛 / Basic 凭据）
-  transport.test.ts       8 项代理机制（Bun init.proxy / Node dispatcher 不写 proxy）
+  opencode2pi.test.ts    67 项不变量测试
+  pool.test.ts           25 项出口池不变量（凭据不外泄 / 关闭即原样 / 判定映射 / 只认完成探测 / 删除选中即关池 / 旧内置 store 迁移时丢弃 / 被动失败记账）
+  transport.test.ts       9 项代理机制（Bun init.proxy / Node dispatcher 不写 proxy）
   host-boundary.test.ts    3 项 src/host/ 下不许出现宿主包名
   session-headers.test.ts  3 项 session 头在两层宿主都真的上了线
 ```

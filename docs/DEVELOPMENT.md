@@ -138,7 +138,7 @@ omp 的 registry 会在内部转发到 `registerCustomApi`
 | `src/host/contract.ts` | 宿主边界：扩展需要运行时提供的全部能力，用**两边都不认**的术语表达（`StreamEngine` / `ModelSpec` / …） |
 | `src/host/omp.ts` | omp 适配：`registerCustomApi` 之外的形状差异（Context 分离字段、`ui.select` 的 `{label,description}`、`errorStatus` 数字字段） |
 | `src/host/pi.ts` | pi 适配：从 system message 里回放工具声明、字符串版 `ui.select`、从消息文本里解析状态码 |
-| `src/transport.ts` | 代理机制**按运行时选**（Bun 的 `init.proxy` / Node 的 undici `ProxyAgent`），屏检与真实请求共用同一份 transport |
+| `src/transport.ts` | 代理机制**按运行时选**（Bun 的 `init.proxy` / Node 的 undici `ProxyAgent`），闸门/完成探测与真实请求共用同一份 transport |
 | `src/seed.ts` | 静态种子（冷启动必需）+ 已知失效 id |
 | `src/metadata.ts` | models.dev → 宿主扁平模型契约；免费判定 |
 | `src/discovery.ts` | 三级发现阶梯、并发、15s 预算、落盘缓存 |
@@ -150,12 +150,10 @@ omp 的 registry 会在内部转发到 `registerCustomApi`
 | `src/health.ts` | 逐模型探测、判定规则、落盘缓存 |
 | `src/filters.ts` | 用户选择的隐藏规则、落盘与派生隐藏集 |
 | `src/store.ts` | 数据目录与读写：四处散落的 `tmpdir()` 拼接集中在这里；`OPENCODE2PI_DATA_DIR` 覆盖（测试用） |
-| `src/exits.ts` | `exits.txt` 的文法：解析/拒绝原因/写回/凭据脱敏 |
-| `src/sources.ts` | 内置免费代理源（18 条，**不分档**）与地址行解析 |
-| `src/pool.ts` | 出口池状态：开关、选中出口、证据落盘、`poolFetch` 包装器、被动标记 |
-| `src/prefilter.ts` | 隧道预筛：每地址一次 CONNECT，2s 硬预算（覆盖 DNS 与连接），不消耗推理配额 |
-| `src/pool-probe.ts` | 预筛 → 屏检（cloudflare trace，5s 预算 + S/A/B/C 分级）、闸门探测、完成探测、内置源补充（合并取源 + 1 小时源缓存 + 源开关） |
-| `src/pool-cmd.ts` | `/opencode2pi pool` 的八项 TUI 菜单与六项动作（选自定义 / 选已扫描内置 / 扫描内置 / 删除 / 设置免费源 / 清空内置结果），以及「开启出口池」在无选中出口时的三分叉 |
+| `src/exits.ts` | `exits.txt` 的文法：解析/拒绝原因/写回/凭据脱敏/地址行解析 |
+| `src/pool.ts` | 出口池状态（仅自定义出口）：开关、选中出口、证据落盘、`poolFetch` 包装器、被动标记 |
+| `src/pool-probe.ts` | 闸门探测（最小形状请求）与完成探测（真实短回答）；没有批量屏检 |
+| `src/pool-cmd.ts` | `/opencode2pi pool` 的四项 TUI 菜单（开关 / 选择或新增 / 删除 / 查看状态）与删除选中出口后的收尾 |
 | `src/commands.ts` | `/opencode2pi` 五条命令（doctor/status/probe/filter/pool）与 TUI |
 
 > `gate.ts` 单独存在是有原因的：如果 doctor 和健康探测各写一份形状，两者一旦漂移，
@@ -257,6 +255,24 @@ omp 的 registry 会在内部转发到 `registerCustomApi`
 
 ### 4.7 出口池：能换、但只手动换
 
+> **现状（2026-10-21）：内置免费出口池已整体删除。** OpenCode 现在对机房 IP 大面积回
+> 403，公开列表里能用的寥寥无几，扫描它们花掉的配额远大于收益，所以 `sources.ts`、
+> `prefilter.ts`、批量屏检、入池/配额/隔离机制全部移除。**当前实现只有自定义出口**：
+>
+> - `exits.txt` 是唯一出口来源；`pool.json`（store v3）只存开关、选中项与每条出口的
+>   闸门/完成证据。旧 store 里的内置证据、`screen`、`quarantine`、`disabledSources`
+>   在读取时丢弃。
+> - 菜单四项：开启/关闭、选择或新增出口、删除出口、查看当前状态。
+>   「开启」在没有选中出口时直接进入出口列表（没有第二来源可选了）。
+> - 选择出口时才测量：闸门探测 → 完成探测（`verifyExit`），30 分钟内的完成证据直接复用。
+> - 删除当前选中的出口会**自动关闭出口池**（防止「开着但没选中」这个静默直连状态）；
+>   还有别的出口时问用户要不要改选。`exits.txt` 被手工改掉、选中项消失时同样自动关闭。
+> - 失败仍然只记账、不轮换（`recordPassive`）；`poolFetch` 关闭时返回 `undefined`。
+>
+> 本节以下关于扫描、屏检、预筛、隔离、免费源与源缓存的段落，是**已删除实现的历史记录**，
+> 保留下来是因为其中的实测结论（握手成本、429 语义、代理机制按运行时选）依然有用；
+> 它们不再描述当前代码。
+
 **为什么需要它**：匿名额度按 **出口 IP × 模型** 记账。同一个出口上换模型通常还有额度
 （§4.4.1 实测），同一个模型换出口能不能继续，只有实测才知道 —— 这正是出口探测要问的
 问题（`gate.ts` 的同一份形状、同一个代理机制）。而且**闸门 200 只是响应头**：一个共享
@@ -270,8 +286,8 @@ omp 的 registry 会在内部转发到 `registerCustomApi`
 照直连发出去。Node 上要用 undici 的 `ProxyAgent`，且必须连 `fetch` 一起换
 （dispatcher 只与构造它的那份 undici 配套，否则 `TypeError: fetch failed`）。
 `https://` 出口还要给 `ProxyAgent` 传 `proxyTls.rejectUnauthorized: false`：
-免费列表里的自签证书会让 undici 在 CONNECT 之前就拒绝整条隧道，而预筛
-（`prefilter.ts`）必须做同一个选择，否则两边对同一地址的结论会相反
+代理这一跳的证书常常是自签或对不上主机名，undici 会在 CONNECT 之前就拒绝整条隧道。
+闸门/完成探测与真实请求共用同一份 transport，所以不会出现两边对同一地址结论相反
 （`FINDINGS.md` §2.7）。关掉的只是代理跳；隧道内的目标证书照常校验。
 取不到机制时 `poolFetch` 返回 `undefined` 并由请求路径**明确警告一次**；
 在线路上「池在工作」和「池是摆设」是无法区分的，所以这条静默路径必须堵死。

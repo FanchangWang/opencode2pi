@@ -1,10 +1,9 @@
 /**
  * The extension's data directory, in one place.
  *
- * Five files live here: the probe cache (`health.json`), the filter choice
- * (`filters.json`), the exit pool (`pool.json` + the user's `exits.txt`), the
- * models.dev discovery cache (`models-dev-*.json`) and the free source list
- * (`free-sources.json`, an hour-long cache of the downloaded proxy lists).
+ * Four files live here: the probe cache (`health.json`), the filter choice
+ * (`filters.json`), the exit pool (`pool.json` + the user's `exits.txt`) and the
+ * models.dev discovery cache (`models-dev-*.json`).
  * Each of them used to spell out `join(tmpdir(), 'opencode2pi', …)` for itself,
  * and a second copy of a path is how two files end up in two directories that
  * drift apart.

@@ -236,7 +236,8 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
    「免配额屏检」的请求形状（opencode2api 用同一 URL 做可达性探针）。
 
 副作用要注意：**宿主对传输层失败会重试（实测 120s 内 28 次）**，所以一个坏出口
-的代价不是一次失败，而是一串；这也正是换出口前必须先屏检（不花配额）的理由。
+的代价不是一次失败，而是一串；这也正是换出口前必须先跑探测确认的理由 ——
+一次闸门 + 一次完成探测的代价，远小于切到一个死出口后被宿主重试一串。
 
 ### 2.7 `init.proxy` 只在 Bun 上成立，Node 会静默忽略（2026-10-17 实测，修正 §2.6 第 2 条）
 
@@ -255,10 +256,11 @@ opencode2api v1.4.1（commit `076451f`/`2319941`/`a9470df`）把 keyless
 菜单照常显示选中的出口、屏检证据照常显示，而每个请求仍从本机 IP 出发 ——
 恰好是配额已经耗尽的那个地址。
 
-连带的次生损害：屏检（`traceEgress`）当时也用 `init.proxy`，于是在 Node 上
+连带的次生损害：当时的屏检（`traceEgress`）也用 `init.proxy`，于是在 Node 上
 六个出口（含美国 IP `40.192.70.191`）全部测出 `exitIP = 120.225.64.15` ——
 屏检从来没测过代理，全在测本机，于是把死代理判成 A/B 档「可用」并写进了
-`pool.json`。**这批可用性证据在修复前整体不可信，需要重新屏检。**
+`pool.json`。**这批可用性证据在修复前整体不可信。**（屏检与内置池已于
+2026-10-21 整体移除；这条留作「探测必须与真实请求共用 transport」的实证。）
 
 Node 上的机制是 undici 的 `ProxyAgent`，有一个必须写下来的坑：
 
@@ -278,14 +280,15 @@ pi 自带 undici 8.10.2，且是 `@earendil-works/pi-coding-agent` 的**直接**
 内置免费源里有一批 `https://host:port` 地址，它们的证书是自签的或者对不上
 主机名。undici 的 `ProxyAgent` 默认会在**发 CONNECT 之前**校验代理这一跳，
 于是地址被判死 —— 而隧道本身可能完全可用。Bun 的 `init.proxy` 与 Node 的
-`ProxyAgent({ proxyTls: { rejectUnauthorized: false } })` 都按同一规则处理；
-预筛（`prefilter.ts` 的 `tlsConnect`）也必须关，否则预筛与真实请求会对同一个
-地址给出相反结论。**关掉的只是到代理的这一跳**；通过隧道打到
-`cloudflare.com` / `opencode.ai` 的 TLS 仍由各自的客户端正常校验。
+`ProxyAgent({ proxyTls: { rejectUnauthorized: false } })` 都按同一规则处理。
+**关掉的只是到代理的这一跳**；通过隧道打到 `cloudflare.com` / `opencode.ai`
+的 TLS 仍由各自的客户端正常校验。预筛已随内置池删除；这条规则现在只作用于
+真实请求与闸门/完成探测（三者共用 `transport.ts`，所以不会出现同一地址
+「探测判死、真实请求可用」的偏差）。
 
-测试钉两点：自签证书的本地 TLS 代理在预筛中是**通过**（修复前是
-`DEPTH_ZERO_SELF_SIGNED_CERT`）；`http://` 出口仍以字符串形式交给
-`ProxyAgent`，不受这次改动影响。
+测试钉住：`https://` 出口在 undici 侧以
+`ProxyAgent({ proxyTls: { rejectUnauthorized: false } })` 构造（`transport.test.ts`），
+`http://` 出口仍以字符串形式交给 `ProxyAgent`，不受这次改动影响。
 
 **流在响应头之后断掉必须记账（2026-10-19 合并上游 `2baeb87`）**：闸门 200 与完成
 探测都只覆盖一次短请求。共享代理完全可能在拿到 200、吐出几个 token 后断流，
