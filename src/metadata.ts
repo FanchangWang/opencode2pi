@@ -37,12 +37,16 @@ export const DEFAULT_MAX_TOKENS = 16_384
  * CLI config both use 1048576 (opencode2dsh 0.3.11 LOCAL_MODEL_OVERRIDES, issue
  * #56 metadata note).
  *
- * `deepseek-v4.1-flash-free` is the same shape from opencode2dsh 0.3.13 (#81):
+ * `deepseek-v4.1-flash-free` is the #81 entry corrected by opencode2dsh #99:
  * models.dev gives the free and paid twins of one canonical model different
  * windows — the free id says 200000 while `deepseek-v4.1-flash` says 1000000.
- * Needle-in-a-haystack probes of the live free lane recalled correctly at
- * 1,011,668 prompt tokens, so 1048576 is measured, not copied from the paid
- * entry. Only `contextWindow` is overridden; `maxTokens` keeps the feed's 32000.
+ * #81's 2026-10-16 probe recalled a needle at 1,011,668 tokens, but the same
+ * lane re-probed on 2026-10-20 recalls only at 315,596 and refuses ~326k with
+ * `context_length_exceeded`; 1M is no longer served. Declaring 1M is actively
+ * harmful: the host compacts at 0.8 × contextWindow (=800k), so a long session
+ * grows past the real ceiling without ever compacting. 300000 makes it compact
+ * at 240k, and 240k + the 32k output budget is 272k, still below 315,596.
+ * Only `contextWindow` is overridden; `maxTokens` keeps the feed's 32000.
  *
  * Applied in {@link normalizeEntry}; once the feed itself publishes the
  * corrected value the values match and the entry stops firing — it stays as a
@@ -55,8 +59,8 @@ const LOCAL_MODEL_OVERRIDES: Readonly<Record<string, { readonly contextWindow: n
 		reason: 'MiMo model card and official CLI config declare 1048576; models.dev publishes 200000',
 	},
 	'deepseek-v4.1-flash-free': {
-		contextWindow: 1_048_576,
-		reason: 'paid twin declares 1000000 and the free lane recalled a needle at 1,011,668 tokens; models.dev publishes 200000',
+		contextWindow: 300_000,
+		reason: 'free lane recalls a needle at 315,596 tokens and refuses ~326k with context_length_exceeded (2026-10-20); models.dev publishes 200000',
 	},
 }
 

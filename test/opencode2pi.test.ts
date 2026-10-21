@@ -112,12 +112,14 @@ describe('capability mapping (T1)', () => {
 
 	test('applies the local deepseek-v4.1 context override without widening its twin bucket', () => {
 		// models.dev gives the free id 200000 while its paid twin declares
-		// 1000000; a live needle probe recalled at 1,011,668 prompt tokens
-		// (opencode2dsh #81). Only contextWindow changes; maxTokens stays 32000.
+		// 1000000. #81 measured 1,011,668 tokens recalled on 2026-10-16, but the
+		// 2026-10-20 re-probe recalls at 315,596 and refuses ~326k with
+		// context_length_exceeded (opencode2dsh #99), so the free entry advertises
+		// 300000. Only contextWindow changes; maxTokens stays 32000.
 		const free = normalizeEntry({ id: 'deepseek-v4.1-flash-free', limit: { context: 200_000, output: 32_000 } })
-		expect(free.config.contextWindow).toBe(1_048_576)
+		expect(free.config.contextWindow).toBe(300_000)
 		expect(free.config.maxTokens).toBe(32_000)
-		expect(free.notes.join(' ')).toContain('200000 → 1048576')
+		expect(free.notes.join(' ')).toContain('200000 → 300000')
 
 		// Another model in the same 200000 bucket has no live measurement, so
 		// the feed still speaks unchanged: the override is per id, not per bucket.

@@ -94,11 +94,15 @@ models.dev 声明 `limit.context: 200000`，opencode2dsh 用模型卡把它覆�
 models.dev 仍以 0 价发布，纯靠元数据判定会继续把死模型端上选择器 ——
 `UNAVAILABLE` denylist 是唯一挡住它的机制，所以下线必须手工登记。
 
-**`deepseek-v4.1-flash-free` 的上下文窗口同理，2026-10-19 合并上游 #81**：
+**`deepseek-v4.1-flash-free` 的上下文窗口，2026-10-21 按上游 #99 改判 300000**：
 models.dev 给同一 canonical 模型的免费与付费两个 id 写了不同的窗口 —— 免费 id
-写 `limit.context: 200000`，付费 `deepseek-v4.1-flash` 写 1000000。上游在免费
-通道上用 needle-in-a-haystack 实测到 **1,011,668 prompt tokens 仍能正确召回**，
-所以取 1048576，而不是照抄付费 id。只覆盖 `contextWindow`，`maxTokens` 保持
+写 `limit.context: 200000`，付费 `deepseek-v4.1-flash` 写 1000000。2026-10-19
+合并上游 #81 时取 1048576（2026-10-16 实测 1,011,668 prompt tokens 仍能召回）；
+但上游 2026-10-20 对同一通道复测：**315,596 tokens 仍能召回，~326k 直接
+`context_length_exceeded`**，1M 已不再被服务。声明 1M 不只是偏乐观，而是主动
+有害：宿主在 0.8 × contextWindow（800k）才压缩，长会话会在从未压缩的情况下越过
+真实上限，然后硬失败。现取 **300000**：宿主在 240k 压缩，240k + 32k 输出预算
+= 272k，仍低于 315,596 的实测召回点。只覆盖 `contextWindow`，`maxTokens` 保持
 models.dev 的 32000。`LOCAL_MODEL_OVERRIDES` 按 id 生效，同桶的
 `glm-5.3-flash-free` 仍是 200000 —— 测试同时钉住这两点，避免以后把覆盖写成
 「凡 200000 就放宽」。
